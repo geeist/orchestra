@@ -7,7 +7,7 @@ import type { Candidate, Issue } from './scratch'
 /** One dispatch, as the orchestrator records it. */
 export type Job = {
   id: string
-  /** The issue's path, relative to the repo root. */
+  /** The issue's path, relative to the repo root, or `#42` on GitHub. */
   issue: string
   slug: string
   title: string
@@ -21,7 +21,7 @@ export type Job = {
   /** Set once the outcome reached the orchestrator's model. */
   finishedAt?: number
   outcome?: string
-  /** The person let the issue go: its hold ends although the file is unchanged. */
+  /** The person let the issue go: its hold ends although the issue is unchanged. */
   releasedAt?: number
   /** A report that came after the job settled without one. */
   late?: { outcome: string; summary: string; at: number }
@@ -135,6 +135,7 @@ export function board(input: {
     return {
       path: one.path,
       feature: one.feature,
+      ...(one.featureTitle === undefined ? {} : { featureTitle: one.featureTitle }),
       slug: one.slug,
       title: one.title,
       tone,
@@ -227,11 +228,11 @@ export function table(list: readonly Candidate[]): string {
   const next = list.find(one => one.canStart)
 
   return list
-    .map(one => `${one.feature}/${one.slug}: ${one.reason}${one === next ? ' (next)' : ''}. ${one.title}`)
+    .map(one => `${one.ref}: ${one.reason}${one === next ? ' (next)' : ''}. ${one.title}`)
     .join('\n')
 }
 
-/** The issue file's state in one line. */
+/** The issue's state in one line. */
 export function describe(issue: Issue): string {
   const boxes = issue.doneBoxes + issue.openBoxes
 

@@ -1,7 +1,7 @@
 {
   "name": "orchestra",
-  "version": "0.3.0",
-  "description": "Runs .scratch issues one at a time in unattended worker sessions, each in its own Ghostty tab, shows them on a live board, and wakes the orchestrator when a worker reports",
+  "version": "0.4.0",
+  "description": "Runs .scratch or GitHub issues one at a time in unattended worker sessions, each in its own Ghostty tab, shows them on a live board, and wakes the orchestrator when a worker reports",
   "author": {
     "name": "Tobias Kleemann",
     "url": "https://github.com/geeist"
@@ -12,7 +12,7 @@
     "workerPrompt": {
       "type": "string",
       "title": "Worker prompt",
-      "description": "The first prompt of each worker session; {issue} is replaced by the issue's path",
+      "description": "The first prompt of each worker session; {issue} is replaced by the issue's path, or #42 for a GitHub issue",
       "default": "/mattpocock-skills:implement {issue}"
     },
     "permissionMode": {

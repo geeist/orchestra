@@ -1,23 +1,37 @@
 // The local issue tracker, read: `.scratch/<feature>/issues/NN-slug.md`, each
 // with a Status line, a Blocked by line and checkboxes (the repo's
-// docs/agents/issue-tracker.md). Pure, so the tests cover it whole.
+// docs/agents/issue-tracker.md). Also the plan both trackers share: which
+// issue can start, and which one a reference names. Pure, so the tests cover
+// it whole.
 
 export type Issue = {
-  /** Relative to the repo root: `.scratch/<feature>/issues/03-ui-shell.md`. */
+  /**
+   * What names the issue for good: relative to the repo root
+   * (`.scratch/<feature>/issues/03-ui-shell.md`), or `#42` on GitHub.
+   */
   path: string
+  /** The .scratch folder, or the parent issue on GitHub (`#12`, "" for none). */
   feature: string
-  /** The file name's leading number, two digits at least: `03`. */
+  /** The parent issue's title, on GitHub. */
+  featureTitle?: string
+  /** The file name's leading number, two digits at least (`03`), or the GitHub issue's (`42`). */
   number: string
-  /** The file name without `.md`: `03-ui-shell`. */
+  /** The file name without `.md` (`03-ui-shell`), or `#42` on GitHub. */
   slug: string
+  /** How the tools name it to the model: `local-stack/03-ui-shell`, or `#42`. */
+  ref: string
   title: string
-  /** The Status line's first word, lower-cased; "" when there is none. */
+  /** The Status line's first word, lower-cased, or the GitHub triage label's role; "" when there is none. */
   status: string
-  /** The numbers on the Blocked by line, spelled like `number`. */
+  /**
+   * The numbers on the Blocked by line, spelled like `number`. On GitHub only
+   * the blockers still open, as `#41`: done there means closed, so each one
+   * keeps the issue waiting.
+   */
   blockedBy: string[]
   openBoxes: number
   doneBoxes: number
-  /** A done status, or every checkbox ticked (how 01 and 02 were closed). */
+  /** A done status, or every checkbox ticked (how 01 and 02 were closed); closed on GitHub. */
   isDone: boolean
 }
 
@@ -32,14 +46,15 @@ export function parseIssue(path: string, text: string): Issue {
   const slug = (parts.at(-1) ?? path).replace(/\.md$/, '')
   const status = (field(text, 'Status') ?? '').replace(/[`*_]/g, '').trim().split(/\s+/)[0] ?? ''
   const blocked = field(text, 'Blocked by') ?? ''
-  const openBoxes = count(text, /^\s*[-*+]\s+\[ \]/gm)
-  const doneBoxes = count(text, /^\s*[-*+]\s+\[[xX]\]/gm)
+  const { openBoxes, doneBoxes } = boxes(text)
+  const feature = parts.at(-3) ?? ''
 
   return {
     path,
-    feature: parts.at(-3) ?? '',
+    feature,
     number: normalize(slug.match(/^\d+/)?.[0] ?? slug),
     slug,
+    ref: `${feature}/${slug}`,
     title: text.match(/^#\s+(.+?)\s*$/m)?.[1] ?? slug,
     status: status.toLowerCase(),
     blockedBy: /^\s*none\b/i.test(blocked) ? [] : (blocked.match(/\d+/g) ?? []).map(normalize),
@@ -72,25 +87,41 @@ export function plan(issues: readonly Issue[], held: ReadonlyMap<string, string>
 
 /**
  * The issues `ref` names: a path, a slug (`03-ui-shell`), a number (`03`, `3`),
- * or either behind its feature (`local-stack/03`).
+ * or either behind its feature (`local-stack/03`). On GitHub also `#42`, a
+ * link to the issue, or `#12/42`.
  */
 export function findIssues<T extends Issue>(issues: readonly T[], ref: string): T[] {
-  const want = ref.trim().replace(/^\.\//, '').toLowerCase()
+  const want = ref
+    .trim()
+    .replace(/^\.\//, '')
+    .replace(/^https?:\/\/\S+\/issues\/(\d+)\/?$/, '#$1')
+    .toLowerCase()
   const slash = want.lastIndexOf('/')
   const feature = slash > 0 && !want.endsWith('.md') ? want.slice(0, slash) : undefined
   const name = feature === undefined ? want : want.slice(slash + 1)
 
   return issues.filter(issue => {
     if (issue.path.toLowerCase() === want) return true
-    if (feature !== undefined && issue.feature.toLowerCase() !== feature) return false
-    return issue.slug.toLowerCase() === name || (/^\d+$/.test(name) && issue.number === normalize(name))
+    if (feature !== undefined && !sameFeature(issue.feature, feature)) return false
+    return issue.slug.toLowerCase() === name || (/^\d+$/.test(name) && normalize(issue.number) === normalize(name))
   })
 }
 
-function field(text: string, name: string): string | undefined {
+/** Whether `name` names the feature: its folder, or its parent issue with or without the `#`. */
+export function sameFeature(feature: string, name: string): boolean {
+  return feature.replace(/^#/, '').toLowerCase() === name.replace(/^#/, '').toLowerCase()
+}
+
+/** The value of a `Name: value` line, its bold stars dropped. */
+export function field(text: string, name: string): string | undefined {
   const line = new RegExp(String.raw`^[ \t]*\**[ \t]*${name}[ \t]*:[ \t]*\**[ \t]*(.*)$`, 'im')
 
   return text.match(line)?.[1]?.replace(/\**\s*$/, '')
+}
+
+/** The checkboxes in Markdown: open and ticked. */
+export function boxes(text: string): { openBoxes: number; doneBoxes: number } {
+  return { openBoxes: count(text, /^\s*[-*+]\s+\[ \]/gm), doneBoxes: count(text, /^\s*[-*+]\s+\[[xX]\]/gm) }
 }
 
 function count(text: string, pattern: RegExp): number {
@@ -101,6 +132,11 @@ function normalize(number: string): string {
   return /^\d+$/.test(number) ? String(Number(number)).padStart(2, '0') : number
 }
 
+/** By feature, the GitHub issues without one last, then by number. */
 function byOrder(a: Issue, b: Issue): number {
-  return a.feature.localeCompare(b.feature) || a.number.localeCompare(b.number, undefined, { numeric: true })
+  return (
+    Number(a.feature === '') - Number(b.feature === '') ||
+    a.feature.localeCompare(b.feature, undefined, { numeric: true }) ||
+    a.number.localeCompare(b.number, undefined, { numeric: true })
+  )
 }

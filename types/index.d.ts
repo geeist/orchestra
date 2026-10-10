@@ -9,9 +9,12 @@ export type OrchestraTone = 'done' | 'running' | 'ready' | 'held' | 'waiting'
 
 /** One issue as the board shows it. */
 export type OrchestraIssue = {
-  /** Relative to the repo root. */
+  /** Relative to the repo root, or `#42` on GitHub. */
   path: string
+  /** The .scratch folder, or the parent issue on GitHub (`#12`, "" for none). */
   feature: string
+  /** The parent issue's title, on GitHub. */
+  featureTitle?: string
   slug: string
   title: string
   tone: OrchestraTone
@@ -47,14 +50,16 @@ export type OrchestraJob = {
 }
 
 export type OrchestraBoard = {
-  /** Every issue in .scratch, in order: feature, then number. */
+  /** Every issue in the tracker, in order: feature, then number. */
   issues: OrchestraIssue[]
+  /** Where the issues live: .scratch, or GitHub. */
+  tracker?: 'local' | 'github'
   running?: OrchestraJob
   /** Finished jobs, newest first. */
   recent: OrchestraJob[]
   /** The path of the issue `dispatch` takes next. */
   next?: string
-  /** Why there is no board: not a git repo, or the files failed to read. */
+  /** Why there is no board: the issues failed to read. */
   problem?: string
 }
 
@@ -69,11 +74,11 @@ export type OrchestraReport = {
   summary: string
   /** `git log --oneline` lines since dispatch. */
   commits: string[]
-  /** The issue file now: status and boxes. */
+  /** The issue now: status and boxes. */
   issue: string
   /** `git status --porcelain` lines. */
   dirty: string[]
-  /** `feature/slug` of the issue that can start next. */
+  /** The issue that can start next, as the tools name it (`feature/slug`, or `#42`). */
   next?: string
 }
 

@@ -1,6 +1,6 @@
 # orchestra
 
-A Claude Code plugin that works through a backlog of Markdown issues for you. It starts one unattended **worker** session per issue, each in its own Ghostty tab. The session that started it, the **orchestrator**, is told when the worker reports. It then checks the commits and starts the next issue.
+A Claude Code plugin that works through a backlog of issues for you: Markdown files in `.scratch`, or the repo's GitHub issues. It starts one unattended **worker** session per issue, each in its own Ghostty tab. The session that started it, the **orchestrator**, is told when the worker reports. It then checks the commits and starts the next issue.
 
 - **One issue at a time**, on your current branch, in the order you numbered them.
 - **A live board** shows every issue, the running worker and the last jobs.
@@ -18,6 +18,7 @@ A Claude Code plugin that works through a backlog of Markdown issues for you. It
 | **`claude` in your interactive shell** | The same command is how the worker starts, so your own `claude` alias or function applies to it. |
 | **Claude Code 2.1.296 or later** | Plugin hooks modules are early access, and their API changes between releases. orchestra is built and tested on 2.1.296. |
 | **A git repository** | Workers commit there, and orchestra keeps its state in the repo's git directory. |
+| **[`gh`](https://cli.github.com), logged in** *(GitHub issues only)* | orchestra reads the issues with `gh api graphql`, and workers update them with `gh issue`. |
 | **[mattpocock-skills](https://github.com/mattpocock/skills)** *(optional)* | The default worker prompt is `/mattpocock-skills:implement {issue}`. Install it with `/plugin install mattpocock-skills@claude-plugins-official`, or set your own prompt (see [Settings](#settings)). |
 
 ## Install
@@ -45,13 +46,17 @@ claude plugin install orchestra@orchestra
 
 ## Quick start
 
-1. **Write issues** in `.scratch/<feature>/issues/`, one file per issue (see [Issues](#issues)).
+1. **Write issues** in `.scratch/<feature>/issues/`, one file per issue, or as GitHub issues (see [Issues](#issues)).
 2. **Run `/orchestrate`** in a Claude Code session in the repo. It puts a `/goal …` in the prompt box. Press Enter.
 3. **Watch the board** with `/orchestra`, or just follow the band above the prompt.
 
 The orchestrator loops: it dispatches a worker, waits for its report, checks its commits, then starts the next issue. It stops when no issue can start any more. To run a single issue, use `/dispatch 03`.
 
 ## Issues
+
+orchestra reads the tracker that `docs/agents/issue-tracker.md` names, the file `/setup-matt-pocock-skills` writes. When its heading says GitHub, orchestra reads the repo's GitHub issues (see [GitHub issues](#github-issues)). Otherwise it reads `.scratch`. Switching the tracker there switches orchestra too.
+
+### In `.scratch`
 
 orchestra reads `.scratch/<feature>/issues/NN-slug.md`:
 
@@ -91,6 +96,46 @@ Blocked by: 01
 | `needs-info` | blocked | The question is under `## Comments` in the issue |
 | `ready-for-human` | failed | Something broke that the worker couldn't repair |
 
+### GitHub issues
+
+These are the issues `/to-spec` and `/to-tickets` publish once the tracker is GitHub. A **feature** is a parent issue, such as the spec. Its **tickets** are the issues under it:
+
+| Part | Rule |
+|---|---|
+| **Ticket** | A sub-issue of the parent, or an issue whose `## Parent` section (or `Part of #12` line) names it. The parent itself is never dispatched |
+| **Without a parent** | An issue counts once triage labelled it `ready-for-agent`, `needs-info` or `ready-for-human`, and shows under *Other issues* |
+| **Status** | Its triage label. A label that holds the issue back wins over `ready-for-agent`. Label names mapped in `docs/agents/triage-labels.md` work too |
+| **Blocked by** | GitHub's issue dependencies, and the issues the `## Blocked by` section names. Only blockers still open count |
+| **Done** | Closed |
+
+```markdown
+## Parent
+
+#12
+
+## What to build
+
+The form posts to /login.
+
+## Acceptance criteria
+
+- [ ] A wrong password shows an error under the field
+
+## Blocked by
+
+- #41
+```
+
+orchestra reads every open issue (up to 1,000) and the 50 closed last, which show a feature's finished tickets. Name an issue `#42`, `42`, its link, or `#12/42`.
+
+**The worker updates the issue with `gh`:**
+
+| Issue | Report | Means |
+|---|---|---|
+| Closed, with a comment naming the commits | done | Implemented and committed. The commits stay local until you push |
+| Label `ready-for-agent` swapped for `needs-info` | blocked | The question is in a comment on the issue |
+| Label `ready-for-agent` swapped for `ready-for-human` | failed | Something broke that the worker couldn't repair |
+
 ## Commands and tools
 
 | Command | What it does |
@@ -99,7 +144,7 @@ Blocked by: 01
 | `/dispatch [issue] [--force]` | Starts one worker. Without an issue, it takes the next one that can start. `--force` starts an issue that can't start, or starts on a working tree with uncommitted changes |
 | `/orchestra` | Opens the board |
 
-An issue can be named by its number (`03`), its slug (`03-login-form`), `<feature>/<number>` (`login/03`), or its path.
+An issue can be named by its number (`03`), its slug (`03-login-form`), `<feature>/<number>` (`login/03`), or its path. On GitHub, by `#42`, `42`, its link or `#12/42`, and a feature by its parent (`/orchestrate #12`).
 
 **The model's tools:** an orchestrator gets `mcp__orchestra__issues`, `mcp__orchestra__dispatch` and `mcp__orchestra__wait`. A worker gets `mcp__orchestra__report` instead, with outcome `done`, `blocked` or `failed`.
 
@@ -117,11 +162,12 @@ An issue can be named by its number (`03`), its slug (`03-login-form`), `<featur
 - **Worker tabs open in the orchestrator's window,** not whichever Ghostty window is in front. Whenever you type into the orchestrator, orchestra notes which Ghostty terminal you typed in. Until it has one, it looks for the one window with a terminal in the orchestrator's directory, not counting worker tabs. If it can't tell, the tab opens in the front window.
 - **Workers are briefed** not to ask questions, to commit, to set the issue's Status, and to call `report` last.
 - **A worker that stops without reporting** is reminded twice, then marked stalled. A turn that ends while the worker's own agents still run doesn't count.
-- **Held issues:** once a worker finishes an issue, orchestra doesn't dispatch that issue again until its file changes. This stops it from retrying a blocked issue in a loop. **Release** on the board lets the issue go without a change to the file.
+- **Held issues:** once a worker finishes an issue, orchestra doesn't dispatch that issue again until it changes: its file, or on GitHub any update to the issue. This stops it from retrying a blocked issue in a loop. **Release** on the board lets the issue go without a change.
 - **Abandon** stops tracking the worker. Its Ghostty tab keeps running, so close it there.
 - **Late reports count.** A worker can still report after it was marked stalled or abandoned, or after its session exited. The board shows it (`stalled, then reported done`), and the orchestrator's next `wait` returns it.
 - **Waking up:** `wait` blocks for up to 10 minutes at a time. If the orchestrator is idle when its worker reports, orchestra submits the report as a new prompt and sends a desktop notification.
 - **The heartbeat:** every 5 seconds, the worker writes its latest tool call (and its agents') to a file, and the orchestrator updates the board.
+- **GitHub, read sparingly:** the board reads the GitHub issues again once a minute. `issues`, `dispatch` and each report read them at once. If `gh` fails, the board says why, and the running worker still shows.
 
 ## Settings
 
@@ -129,7 +175,7 @@ Change these in `/config`, or when you install.
 
 | Setting | Default | What it sets |
 |---|---|---|
-| `workerPrompt` | `/mattpocock-skills:implement {issue}` | The worker's first prompt. `{issue}` becomes the issue's path; without it, the path is added at the end |
+| `workerPrompt` | `/mattpocock-skills:implement {issue}` | The worker's first prompt. `{issue}` becomes the issue's path, or `#42` for a GitHub issue; without it, that is added at the end |
 | `permissionMode` | `auto` | The worker's `--permission-mode`: `auto`, `acceptEdits`, `manual` or `bypassPermissions` |
 | `model` | *(empty)* | The worker's `--model`. Empty keeps your default |
 
@@ -171,7 +217,8 @@ npx -p typescript tsc -p .
 | `hooks/board.ts` | Turns the state files into the board |
 | `hooks/ui.tsx` | Draws the board, the bands and the tool rows |
 | `hooks/mark.ts` | The band's animated mark: the spinner and the light, as Raster cells |
-| `hooks/scratch.ts` | Reads and plans the issues |
+| `hooks/scratch.ts` | Reads the `.scratch` issues, and plans the issues of either tracker |
+| `hooks/github.ts` | Reads the GitHub issues: the query, the tickets, their labels and blockers |
 | `hooks/launch.ts` | The worker's command line, and the AppleScript that finds the orchestrator's window and opens the tab |
 | `hooks/text.ts` | Everything the models read: tool descriptions, the worker's brief, the reminder |
 | `types/index.d.ts` | The values orchestra keeps in `$.state` |

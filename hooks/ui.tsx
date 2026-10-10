@@ -10,6 +10,7 @@ import type {
   OrchestraWorker,
 } from '../types'
 import { MARK_COLUMNS, MARK_KEY } from './mark'
+import { noIssues } from './text'
 
 // What orchestra draws, as plain functions of the surface's elements and the
 // values in `$.state`: the board pane (/orchestra), the band above the
@@ -56,12 +57,12 @@ function outcomeTone(outcome: string): Tone {
 
 export function pane(el: Els, board: OrchestraBoard | null, columns: number, on: Handlers): RenderElement {
   const { Box, Text, Button } = el
-  if (board === null) return <Text dimColor>Reading .scratch…</Text>
+  if (board === null) return <Text dimColor>Reading the issues…</Text>
   if (board.problem !== undefined) return <Text dimColor>{board.problem}</Text>
-  if (board.issues.length === 0) return <Text dimColor>No issues in .scratch.</Text>
+  if (board.issues.length === 0) return <Text dimColor>{noIssues(board.tracker)}</Text>
 
   const width = slugWidth(board.issues)
-  const features = [...new Set(board.issues.map(one => one.feature))]
+  const features = [...new Map(board.issues.map(one => [one.feature, one.featureTitle]))]
   const count = (tone: OrchestraTone) => board.issues.filter(one => one.tone === tone).length
   const summary = [
     `${count('done')}/${board.issues.length} done`,
@@ -81,9 +82,16 @@ export function pane(el: Els, board: OrchestraBoard | null, columns: number, on:
         ) : null}
       </Box>
       {board.running === undefined ? null : running(el, board.running, on)}
-      {features.map(feature => (
+      {features.map(([feature, title]) => (
         <Box key={`feature:${feature}`} flexDirection="column" marginTop={1}>
-          <Text bold>{feature}</Text>
+          <Box flexDirection="row" gap={1}>
+            <Text bold>{feature === '' ? 'Other issues' : feature}</Text>
+            {title === undefined ? null : (
+              <Text dimColor wrap="truncate-end">
+                {title}
+              </Text>
+            )}
+          </Box>
           {board.issues.filter(one => one.feature === feature).map(one => issueRow(el, one, board.next, width, on))}
         </Box>
       ))}

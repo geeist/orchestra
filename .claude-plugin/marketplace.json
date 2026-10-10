@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "orchestra",
-  "description": "orchestra: works .scratch issues through unattended Claude Code worker sessions",
+  "description": "orchestra: works .scratch or GitHub issues through unattended Claude Code worker sessions",
   "owner": {
     "name": "Tobias Kleemann",
     "url": "https://github.com/geeist"
@@ -9,7 +9,7 @@
   "plugins": [
     {
       "name": "orchestra",
-      "description": "Runs .scratch issues one at a time in unattended worker sessions, each in its own Ghostty tab, shows them on a live board, and wakes the orchestrator when a worker reports",
+      "description": "Runs .scratch or GitHub issues one at a time in unattended worker sessions, each in its own Ghostty tab, shows them on a live board, and wakes the orchestrator when a worker reports",
       "author": {
         "name": "Tobias Kleemann",
         "url": "https://github.com/geeist"

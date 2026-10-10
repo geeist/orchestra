@@ -1,18 +1,21 @@
 import { atom, memberOf, read, update } from 'claude-code'
 import type { EngineInterface, HookFailure, PluginOptions, Register } from 'claude-code'
 
-import type { OrchestraReport, OrchestraShown } from '../types'
+import type { OrchestraBoard, OrchestraReport, OrchestraShown } from '../types'
 import { board, describe, describeCall, holds, lateReport, MAX_NUDGES, OUTCOMES, settle, table } from './board'
 import type { Job, Settled, WorkerState } from './board'
+import { githubIssues, namesGithub, QUERY, triageLabels } from './github'
+import type { Node, Page, Tracker } from './github'
 import { commandLine, FOCUS_TAB, FRONT_TERMINAL, OPEN_TAB, workerPrompt } from './launch'
 import { FRAME_MS, frameAt, MARK_KEY, markCells, PALETTES, paletteFor } from './mark'
-import { findIssues, parseIssue, plan } from './scratch'
+import { findIssues, parseIssue, plan, sameFeature } from './scratch'
 import type { Candidate, Issue } from './scratch'
 import {
   brief,
   DISPATCH_DESCRIPTION,
   goal,
   ISSUES_DESCRIPTION,
+  noIssues,
   NUDGE,
   REPORT_DESCRIPTION,
   WAIT_DESCRIPTION,
@@ -32,6 +35,9 @@ import type { Els, Handlers } from './ui'
 // The two sides talk through files in <git common dir>/orchestra, never
 // tracked and shared by every worktree: `<job>.job.json` is written by the
 // orchestrators, `<job>.worker.json` by the worker alone.
+//
+// The issues are the .scratch files, or the repo's GitHub issues once
+// docs/agents/issue-tracker.md says GitHub; `gh` fetches those.
 
 type $ = EngineInterface
 
@@ -40,6 +46,9 @@ type Repo = { top: string; dir: string }
 /** A tool's answer: the text the model reads, and what its row draws. */
 type Answer = { text: string; shown?: OrchestraShown }
 
+/** The tracker's issues, and when each last changed. */
+type Loaded = { tracker: Tracker; issues: Issue[]; changedAt: Map<string, number> }
+
 const REFRESH_MS = 5_000
 const BEAT_MS = 5_000
 const WAIT_STEP_SECONDS = 5
@@ -47,6 +56,10 @@ const WAIT_STEP_SECONDS = 5
 const LATE_WINDOW_MS = 24 * 60 * 60_000
 /** Agent states that mean a worker's turn ended to wait for them. */
 const BUSY = new Set(['pending', 'running', 'waiting'])
+/** How long the board's timer reuses the GitHub issues; the tools fetch them anew. */
+const GITHUB_TTL_MS = 60_000
+/** Pages of 100 open GitHub issues read at most. */
+const GITHUB_PAGES = 10
 
 const SHOWN = { plugin: 'orchestra', key: 'shown' } as const
 const boardAtom = atom({ plugin: 'orchestra', key: 'board' } as const, null)
@@ -70,6 +83,8 @@ let palette = PALETTES.dark
 let beat = { activity: '', at: 0, tools: 0, isDirty: false }
 let writing: Promise<void> = Promise.resolve()
 let refreshing: Promise<void> | undefined
+/** The GitHub issues last fetched, shared by calls while they load. */
+let fetched: { at: number; nodes: Promise<Node[]> } | undefined
 
 export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
@@ -200,10 +215,10 @@ export const register: Register = (on, options) => {
 
   on('tool.call', { tool: 'mcp__orchestra__issues' }, async ($, e) => {
     try {
-      const { list, jobs } = await candidates($, await repo($))
+      const { list, jobs, tracker } = await candidates($, await repo($), true)
       const feature = typeof e.feature === 'string' && e.feature !== '' ? e.feature : undefined
-      const shown = list.filter(one => feature === undefined || one.feature === feature)
-      if (shown.length === 0) return { result: 'No issues in .scratch.' }
+      const shown = list.filter(one => feature === undefined || sameFeature(one.feature, feature))
+      if (shown.length === 0) return { result: noIssues(tracker.kind) }
       const drawn = board({ list: shown, jobs, workers: new Map(), session: '', now: await $.clock.now() })
 
       return answer($, e.tool_use_id, { text: table(shown), shown: { kind: 'issues', issues: drawn.issues } })
@@ -301,7 +316,9 @@ async function startOrchestrator($: $): Promise<void> {
     isDeferred: false,
     inputSchema: {
       type: 'object',
-      properties: { feature: { type: 'string', description: 'Only this .scratch/<feature>' } },
+      properties: {
+        feature: { type: 'string', description: 'Only this feature: a .scratch/<feature> folder, or a parent issue (#12)' },
+      },
     },
   })
   await $.tool.register({
@@ -313,7 +330,8 @@ async function startOrchestrator($: $): Promise<void> {
       properties: {
         issue: {
           type: 'string',
-          description: 'A number (03), slug (03-ui-shell), feature/number or path; default the next that can start',
+          description:
+            'A number (03, or #42 on GitHub), slug (03-ui-shell), feature/number or path; default the next that can start',
         },
         force: { type: 'boolean', description: 'Start it although it is not ready or the working tree is dirty' },
       },
@@ -330,17 +348,17 @@ async function startOrchestrator($: $): Promise<void> {
   })
   await $.command.register({
     name: 'dispatch',
-    description: 'Implement a .scratch issue in a worker session in a new Ghostty tab',
+    description: 'Implement an issue in a worker session in a new Ghostty tab',
     argumentHint: '[issue] [--force]',
   })
   await $.command.register({
     name: 'orchestrate',
-    description: 'Put a /goal in the prompt box that works every .scratch issue through workers',
+    description: 'Put a /goal in the prompt box that works every issue through workers',
     argumentHint: '[feature]',
   })
   await $.command.register({
     name: 'orchestra',
-    description: 'Open the orchestra board: the .scratch issues, the running worker and the last jobs',
+    description: 'Open the orchestra board: the issues, the running worker and the last jobs',
   })
   $.clock.every(REFRESH_MS, () => void tick($))
   void tick($)
@@ -411,7 +429,48 @@ async function findRepo($: $): Promise<Repo | undefined> {
   return repoCache ?? undefined
 }
 
-async function loadIssues($: $, top: string): Promise<{ issues: Issue[]; changedAt: Map<string, number> }> {
+/**
+ * The tracker's issues. The GitHub ones are fetched when `isFresh`, or once
+ * the last fetch is a minute old: the board's timer runs every few seconds.
+ */
+async function loadIssues($: $, top: string, isFresh: boolean): Promise<Loaded> {
+  const tracker = await trackerOf($, top)
+  if (tracker.kind === 'local') return { tracker, ...(await loadScratch($, top)) }
+
+  const now = await $.clock.now()
+  if (isFresh || fetched === undefined || now - fetched.at >= GITHUB_TTL_MS) {
+    fetched = { at: now, nodes: fetchGithub($, top) }
+  }
+
+  return { tracker, ...githubIssues(await fetched.nodes, tracker.labels) }
+}
+
+/** The tracker docs/agents/issue-tracker.md names, with docs/agents/triage-labels.md's labels. */
+async function trackerOf($: $, top: string): Promise<Tracker> {
+  if (!namesGithub(await readText($, `${top}/docs/agents/issue-tracker.md`))) return { kind: 'local' }
+
+  return { kind: 'github', labels: triageLabels(await readText($, `${top}/docs/agents/triage-labels.md`)) }
+}
+
+/** The open issues, page by page, and the ones closed last. */
+async function fetchGithub($: $, top: string): Promise<Node[]> {
+  const nodes: Node[] = []
+  let after: string | null = null
+  for (let page = 0; page < GITHUB_PAGES; page += 1) {
+    const args = ['-F', 'owner={owner}', '-F', 'repo={repo}', '-F', `withClosed=${page === 0}`, '-f', `query=${QUERY}`]
+    if (after !== null) args.push('-f', `after=${after}`)
+    const ran = await $.process.run(['gh', 'api', 'graphql', ...args], { cwd: top })
+    if (ran.exitCode !== 0) throw new Error(`gh couldn't read the GitHub issues: ${ran.stderr.trim()}`)
+    const { open, closed } = (JSON.parse(ran.stdout) as Page).data.repository
+    nodes.push(...open.nodes, ...(closed?.nodes ?? []))
+    if (!open.pageInfo.hasNextPage) break
+    after = open.pageInfo.endCursor
+  }
+
+  return nodes
+}
+
+async function loadScratch($: $, top: string): Promise<{ issues: Issue[]; changedAt: Map<string, number> }> {
   const issues: Issue[] = []
   const changedAt = new Map<string, number>()
   const root = `${top}/.scratch`
@@ -443,12 +502,16 @@ async function loadJobs($: $, dir: string): Promise<Job[]> {
   return jobs.sort((a, b) => a.startedAt - b.startedAt)
 }
 
-/** The issues, judged with every job's hold applied. */
-async function candidates($: $, where: Repo): Promise<{ list: Candidate[]; jobs: Job[] }> {
-  const { issues, changedAt } = await loadIssues($, where.top)
+/** The issues, judged with every job's hold applied; `isFresh` fetches GitHub's anew. */
+async function candidates(
+  $: $,
+  where: Repo,
+  isFresh: boolean,
+): Promise<{ list: Candidate[]; jobs: Job[]; tracker: Tracker }> {
+  const { tracker, issues, changedAt } = await loadIssues($, where.top, isFresh)
   const jobs = await loadJobs($, where.dir)
 
-  return { list: plan(issues, holds(jobs, changedAt)), jobs }
+  return { list: plan(issues, holds(jobs, changedAt)), jobs, tracker }
 }
 
 function readWorkerOf($: $, dir: string, job: Job): Promise<WorkerState | undefined> {
@@ -465,7 +528,7 @@ async function deliver($: $, where: Repo, job: Job, settled: Settled, lateFrom?:
 
   const commits = await git($, ['log', '--oneline', `${job.baseHead}..HEAD`], where.top).catch(() => '')
   const dirty = await git($, ['status', '--porcelain'], where.top).catch(() => '')
-  const { list } = await candidates($, where)
+  const { list } = await candidates($, where, true)
   const issue = list.find(one => one.path === job.issue)
   const next = list.find(one => one.canStart)
   const ended = lateFrom === undefined ? now : (job.late?.at ?? now)
@@ -479,7 +542,7 @@ async function deliver($: $, where: Repo, job: Job, settled: Settled, lateFrom?:
     commits: lines(commits),
     issue: issue === undefined ? 'gone' : describe(issue),
     dirty: lines(dirty),
-    ...(next === undefined ? {} : { next: `${next.feature}/${next.slug}` }),
+    ...(next === undefined ? {} : { next: next.ref }),
   }
   void refresh($)
 
@@ -492,9 +555,9 @@ async function deliver($: $, where: Repo, job: Job, settled: Settled, lateFrom?:
     ...(settled.summary === '' ? [] : ['', settled.summary]),
     '',
     `Commits since dispatch: ${commits === '' ? 'none' : `\n${commits}`}`,
-    `Issue file: ${report.issue}`,
+    `Issue: ${report.issue}`,
     `Working tree: ${dirty === '' ? 'clean' : `uncommitted changes\n${dirty}`}`,
-    `Next: ${next === undefined ? 'no issue can start (mcp__orchestra__issues says why)' : `${next.feature}/${next.slug} can start`}`,
+    `Next: ${next === undefined ? 'no issue can start (mcp__orchestra__issues says why)' : `${next.ref} can start`}`,
   ].join('\n')
 
   return { text, shown: { kind: 'report', report } }
@@ -502,7 +565,7 @@ async function deliver($: $, where: Repo, job: Job, settled: Settled, lateFrom?:
 
 async function dispatch($: $, options: PluginOptions, ref: string | undefined, isForced: boolean): Promise<Answer> {
   const where = await repo($)
-  const { list, jobs } = await candidates($, where)
+  const { list, jobs, tracker } = await candidates($, where, true)
   const running = jobs.find(job => job.finishedAt === undefined)
   if (running !== undefined) {
     return { text: `A worker already runs ${running.slug} (job ${running.id}). Call mcp__orchestra__wait for it first.` }
@@ -534,10 +597,14 @@ async function dispatch($: $, options: PluginOptions, ref: string | undefined, i
   }
 
   const now = await $.clock.now()
-  const id = `${pick.feature}-${pick.number}-${now.toString(36)}`
+  // A file name: GitHub's `#12` loses its `#`, and an issue without a feature its part.
+  const id = [pick.feature, pick.number, now.toString(36)]
+    .map(part => part.replace(/[^\w.-]+/g, ''))
+    .filter(part => part !== '')
+    .join('-')
   const briefFile = `${where.dir}/${id}.brief.md`
   const jobFile = `${where.dir}/${id}.job.json`
-  await $.fs.write(briefFile, brief(pick, id))
+  await $.fs.write(briefFile, brief(pick, id, tracker))
   const job: Job = {
     id,
     issue: pick.path,
@@ -634,7 +701,10 @@ async function rebuild($: $): Promise<void> {
   if (where === undefined) return
   const now = await $.clock.now()
   const session = await $.session.id()
-  const { list, jobs } = await candidates($, where)
+  const jobs = await loadJobs($, where.dir)
+  // The band and the jobs still draw while the issues can't be read (gh offline, say).
+  const loaded = await loadIssues($, where.top, false).catch((error: unknown) => new Error(message(error)))
+  const list = loaded instanceof Error ? [] : plan(loaded.issues, holds(jobs, loaded.changedAt))
 
   const workers = new Map<string, WorkerState>()
   for (const [index, job] of jobs.entries()) {
@@ -653,7 +723,10 @@ async function rebuild($: $): Promise<void> {
     }
   }
 
-  const drawn = board({ list, jobs, workers, session, now })
+  const drawn: OrchestraBoard = {
+    ...board({ list, jobs, workers, session, now }),
+    ...(loaded instanceof Error ? { problem: loaded.message } : { tracker: loaded.tracker.kind }),
+  }
   const json = JSON.stringify(drawn)
   if (json !== shownBoard) {
     shownBoard = json
@@ -807,6 +880,14 @@ async function git($: $, args: readonly string[], cwd?: string): Promise<string>
   if (ran.exitCode !== 0) throw new Error(`git ${args.join(' ')}: ${ran.stderr.trim()}`)
 
   return ran.stdout.trim()
+}
+
+async function readText($: $, path: string): Promise<string | undefined> {
+  try {
+    return await $.fs.read(path)
+  } catch {
+    return undefined
+  }
 }
 
 async function readJson<T>($: $, path: string): Promise<T | undefined> {
