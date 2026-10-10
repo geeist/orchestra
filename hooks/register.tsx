@@ -4,7 +4,8 @@ import type { EngineInterface, HookFailure, PluginOptions, Register } from 'clau
 import type { OrchestraReport, OrchestraShown } from '../types'
 import { board, describe, describeCall, holds, lateReport, MAX_NUDGES, OUTCOMES, settle, table } from './board'
 import type { Job, Settled, WorkerState } from './board'
-import { commandLine, FOCUS_TAB, OPEN_TAB, workerPrompt } from './launch'
+import { commandLine, FOCUS_TAB, FRONT_TERMINAL, OPEN_TAB, workerPrompt } from './launch'
+import { FRAME_MS, frameAt, MARK_KEY, markCells, PALETTES, paletteFor } from './mark'
 import { findIssues, parseIssue, plan } from './scratch'
 import type { Candidate, Issue } from './scratch'
 import {
@@ -16,15 +17,17 @@ import {
   REPORT_DESCRIPTION,
   WAIT_DESCRIPTION,
 } from './text'
-import { band, pane, PANE, shownRow, waitRow } from './ui'
-import type { Handlers } from './ui'
+import { band, pane, PANE, shownRow, waitRow, workerBand } from './ui'
+import type { Els, Handlers } from './ui'
 
 // One mod, two roles. A session started with ORCHESTRA_JOB set is a worker:
 // it gets the `report` tool, writes a heartbeat of its tool calls, and is
 // nudged until it reports. Every other session is an orchestrator: it gets
 // `issues`, `dispatch` and `wait`, the commands /dispatch, /orchestrate and
 // /orchestra (the board), and a timer that keeps the board current and wakes
-// it when its worker has reported while it sat idle.
+// it when its worker has reported while it sat idle. It remembers the
+// Ghostty terminal the person types to it in, so worker tabs open in that
+// terminal's window. Both draw a band above the prompt while a worker runs.
 //
 // The two sides talk through files in <git common dir>/orchestra, never
 // tracked and shared by every worktree: `<job>.job.json` is written by the
@@ -48,6 +51,8 @@ const BUSY = new Set(['pending', 'running', 'waiting'])
 const SHOWN = { plugin: 'orchestra', key: 'shown' } as const
 const boardAtom = atom({ plugin: 'orchestra', key: 'board' } as const, null)
 const shownAtom = atom({ plugin: 'orchestra', key: 'shown' } as const, null)
+const workerAtom = atom({ plugin: 'orchestra', key: 'worker' } as const, null)
+const homeAtom = atom({ plugin: 'orchestra', key: 'home' } as const, null)
 
 // The module's own state: a reload starts it over, the files keep the rest.
 let worker: { job: string; dir: string } | undefined
@@ -57,8 +62,11 @@ let lastAnswer = ''
 let waits = 0
 let isTurnRunning = false
 let isTicking = false
-let shownStatus: string | undefined
 let shownBoard = ''
+/** The band's site while it draws the mark as a Raster, which the animation repaints. */
+let bandSite: string | undefined
+let animation: { cancel: () => void } | undefined
+let palette = PALETTES.dark
 let beat = { activity: '', at: 0, tools: 0, isDirty: false }
 let writing: Promise<void> = Promise.resolve()
 let refreshing: Promise<void> | undefined
@@ -67,6 +75,10 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     const job = await $.env.get('ORCHESTRA_JOB')
     const dir = await $.env.get('ORCHESTRA_DIR')
+    const theme = await $.config.list().then(rows => rows.find(row => row.key === 'theme')?.value, () => undefined)
+    palette = paletteFor(theme)
+    // The band took over from the status line: clear one an earlier version pinned before this reload.
+    $.ui.status(undefined)
 
     if (job !== undefined && job !== '' && dir !== undefined && dir !== '') {
       worker = { job, dir }
@@ -85,10 +97,20 @@ export const register: Register = (on, options) => {
   )
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const job = (await read($, boardAtom))?.running
-    if (e.props.hasSurvey || job === undefined) return next(e)
+    const me = await read($, workerAtom)
+    const job = me === null ? (await read($, boardAtom))?.running : undefined
+    if (e.props.hasSurvey || (me === null && job === undefined)) {
+      bandSite = undefined
+      return next(e)
+    }
 
-    return band($.ui.resolve(e), job, e.props.bodyColumns, handlers($, options))
+    const el: Els = $.ui.resolve(e)
+    // Only the terminal draws a Raster, so only there the mark turns.
+    const cells = e.surface === 'terminal' ? markCells(frameAt(await $.clock.now()), palette) : undefined
+    bandSite = cells !== undefined && me?.ended === undefined ? e.requestId : undefined
+    if (me !== null) return workerBand(el, me, cells, e.props.bodyColumns)
+
+    return band(el, job!, cells, e.props.bodyColumns, handlers($, options))
   })
 
   on('ui.render', { component: 'ToolUse', props: { tool: 'mcp__orchestra__wait' } }, async ($, e, next) => {
@@ -124,7 +146,7 @@ export const register: Register = (on, options) => {
     if (!OUTCOMES.includes(outcome)) return { deny: 'outcome is one of done, blocked or failed.' }
 
     await writeWorker($, { state: 'reported', outcome, summary: String(e.summary ?? '') })
-    showStatus($, `orchestra worker · reported ${outcome}`)
+    await endWorker($, outcome)
 
     return { result: 'Reported to the orchestrator, which takes it from here. Stop now.' }
   }).catch(($, e, next) => ({ deny: failure(next.error) }))
@@ -140,6 +162,13 @@ export const register: Register = (on, options) => {
 
   on('turn.start', ($, e, next) => {
     if (worker === undefined) isTurnRunning = true
+
+    return next(e)
+  })
+
+  // The person typing to the orchestrator is at its terminal: remember which.
+  on('prompt.submit', ($, e, next) => {
+    if (worker === undefined && e.origin.kind === 'composer') void locate($)
 
     return next(e)
   })
@@ -208,6 +237,7 @@ export const register: Register = (on, options) => {
     const words = e.args.split(/\s+/).filter(word => word !== '')
     const ref = words.filter(word => word !== '--force').join(' ')
     try {
+      if (e.origin.kind === 'composer') await locate($)
       return { text: (await dispatch($, options, ref === '' ? undefined : ref, words.includes('--force'))).text }
     } catch (error) {
       return { text: `orchestra: ${message(error)}` }
@@ -249,8 +279,19 @@ async function startWorker($: $, job: string): Promise<void> {
   const current = await readJson<WorkerState>($, workerFile())
   if (current === undefined) await writeWorker($, { state: 'running' })
   beat = { ...beat, tools: current?.tools ?? 0 }
-  showStatus($, `orchestra worker · ${job}`)
+  if (current === undefined || current.state === 'running') {
+    await update($, workerAtom, () => ({ job }))
+    animate($, true)
+  } else {
+    await endWorker($, current.state === 'reported' ? (current.outcome ?? 'unknown') : current.state)
+  }
   $.clock.every(BEAT_MS, () => void flushBeat($))
+}
+
+/** The worker's band says how it ended, and stops turning. */
+async function endWorker($: $, ended: string): Promise<void> {
+  animate($, false)
+  if (worker !== undefined) await update($, workerAtom, () => ({ job: worker!.job, ended }))
 }
 
 async function startOrchestrator($: $): Promise<void> {
@@ -342,6 +383,7 @@ async function nudge($: $): Promise<void> {
     void $.prompt.submit({ text: NUDGE })
   } else {
     await writeWorker($, { state: 'stalled', lastAnswer })
+    await endWorker($, 'stalled')
   }
 }
 
@@ -521,6 +563,9 @@ async function dispatch($: $, options: PluginOptions, ref: string | undefined, i
       '-',
       where.top,
       `${line}; unset ORCHESTRA_JOB ORCHESTRA_DIR`,
+      (await read($, homeAtom)) ?? '',
+      await $.session.cwd(),
+      jobs.map(one => one.tab).filter(tab => tab !== '').join(','),
       `ORCHESTRA_JOB=${id}`,
       `ORCHESTRA_DIR=${where.dir}`,
     ],
@@ -615,8 +660,46 @@ async function rebuild($: $): Promise<void> {
     await update($, boardAtom, () => drawn)
   }
 
-  const job = drawn.running
-  showStatus($, job && ['orchestra', job.slug, `${job.minutes}m`, ...(job.activity === undefined ? [] : [job.activity])].join(' · '))
+  animate($, drawn.running !== undefined)
+}
+
+/** Starts or stops the timer that turns the band's mark. */
+function animate($: $, isOn: boolean): void {
+  if (isOn && animation === undefined) animation = $.clock.every(FRAME_MS, () => void paint($))
+  if (!isOn && animation !== undefined) {
+    animation.cancel()
+    animation = undefined
+  }
+}
+
+/** Repaints the mark in the band, if the band draws it; a band not mounted yet, or collapsed, refuses. */
+async function paint($: $): Promise<void> {
+  const site = bandSite
+  if (site === undefined) return
+  const cells = markCells(frameAt(await $.clock.now()), palette)
+  await $.ui.blit({ requestId: site, key: MARK_KEY, cells }).catch(() => undefined)
+}
+
+/**
+ * Remembers the Ghostty terminal the person has focused when it is in this
+ * session's directory: theirs, as they just typed here. A worker's tab opens
+ * in its window. Only in a repo with issues, since every session that is no
+ * worker is an orchestrator.
+ */
+async function locate($: $): Promise<void> {
+  try {
+    if ((await $.env.get('TERM_PROGRAM')) !== 'ghostty') return
+    if (((await read($, boardAtom))?.issues.length ?? 0) === 0) return
+    const ran = await $.process.run(['osascript', '-'], { stdin: FRONT_TERMINAL })
+    const [id = '', dir = ''] = ran.stdout.trim().split('\n')
+    if (ran.exitCode === 0 && id !== '' && sameDir(dir, await $.session.cwd())) await update($, homeAtom, () => id)
+  } catch (error) {
+    $.ui.log(`orchestra: ${message(error)}`, { to: 'debug' })
+  }
+}
+
+function sameDir(a: string, b: string): boolean {
+  return a.replace(/\/+$/, '') === b.replace(/\/+$/, '')
 }
 
 /** The timer: the board, and a wake-up when this session's worker finished while it sat idle. */
@@ -653,7 +736,7 @@ async function tick($: $): Promise<void> {
 /** What the drawings' buttons do; each says how it went in a toast. */
 function handlers($: $, options: PluginOptions): Handlers {
   return {
-    dispatch: path => void toast($, dispatchLine($, options, path)),
+    dispatch: path => void toast($, locate($).then(() => dispatchLine($, options, path))),
     focus: tab => void toast($, focusTab($, tab)),
     abandon: id => void toast($, abandon($, id)),
     release: id => void toast($, release($, id)),
@@ -717,11 +800,6 @@ async function answer($: $, toolUseId: string, given: Answer): Promise<{ result:
   if (given.shown !== undefined) await $.state.set({ ...SHOWN, id: toolUseId }, given.shown)
 
   return { result: given.text }
-}
-
-function showStatus($: $, text: string | undefined): void {
-  if (text !== shownStatus) $.ui.status(text)
-  shownStatus = text
 }
 
 async function git($: $, args: readonly string[], cwd?: string): Promise<string> {

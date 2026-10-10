@@ -6,8 +6,9 @@ import type { OrchestraBoard, OrchestraShown } from '../types'
 
 // The drawings, mounted through the mod on two surfaces. The test's hooks
 // stand for the engine: `state.get` answers the board, `process.run` the
-// osascript a button runs, `ui.toast` records what the person is told, and
-// `ui.render` draws the engine's own row where the mod passes.
+// osascript a button runs, `ui.toast` records what the person is told,
+// `clock.now` the time the band's mark is drawn at, and `ui.render` draws the
+// engine's own row where the mod passes.
 
 const SURFACES = ['terminal', 'desktop'] as const
 
@@ -99,6 +100,7 @@ describe('band above the prompt', () => {
 
   for (const surface of SURFACES) {
     test(`shows the running worker, and gives way to a survey (${surface})`, async ($, on) => {
+      on('clock.now', () => ({ value: 0 }))
       on('state.get', { plugin: 'orchestra', key: 'board' }, () => ({ value: { value: BOARD, version: 1 } }))
       on('ui.render', () => ENGINE)
 
@@ -110,7 +112,34 @@ describe('band above the prompt', () => {
       expect(await survey.find({ text: '02-b' })).toBeUndefined()
       expect(await survey.find({ text: 'engine' })).toBeDefined()
     })
+
+    test(`a worker's band names its job, then how it ended (${surface})`, async ($, on) => {
+      on('clock.now', () => ({ value: 0 }))
+      let me: { job: string; ended?: string } = { job: 's-02-x' }
+      on('state.get', { plugin: 'orchestra', key: 'worker' }, () => ({ value: { value: me, version: 1 } }))
+      on('ui.render', () => ENGINE)
+
+      const working = await $.ui.mount({ plugin: 'orchestra', surface, component: 'AbovePrompt', props })
+      expect(await working.find({ text: 'worker · s-02-x' })).toBeDefined()
+
+      me = { job: 's-02-x', ended: 'done' }
+      const ended = await $.ui.mount({ plugin: 'orchestra', surface, component: 'AbovePrompt', props })
+      expect(await ended.find({ text: 'worker · s-02-x · reported done' })).toBeDefined()
+      expect(await ended.find({ key: 'mark' })).toBeUndefined()
+    })
   }
+
+  test('the terminal draws the mark as a Raster to animate, the desktop as text', async ($, on) => {
+    on('clock.now', () => ({ value: 0 }))
+    on('state.get', { plugin: 'orchestra', key: 'board' }, () => ({ value: { value: BOARD, version: 1 } }))
+
+    const terminal = await $.ui.mount({ plugin: 'orchestra', surface: 'terminal', component: 'AbovePrompt', props })
+    expect((await terminal.find({ key: 'mark' }))?.type).toBe('Raster')
+
+    const desktop = await $.ui.mount({ plugin: 'orchestra', surface: 'desktop', component: 'AbovePrompt', props })
+    expect(await desktop.find({ key: 'mark' })).toBeUndefined()
+    expect(await desktop.find({ text: '◐ orchestra' })).toBeDefined()
+  })
 })
 
 describe('tool result rows', () => {

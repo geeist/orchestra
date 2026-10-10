@@ -108,13 +108,13 @@ An issue can be named by its number (`03`), its slug (`03-login-form`), `<featur
 | Where | What |
 |---|---|
 | **Board** (`/orchestra`) | Every issue by feature, marked ✓ done, ◐ running, ○ can start, ⏸ held or · waiting. Under them, the running worker and the last five jobs. Buttons: **Dispatch next** (`n`), **Start** on an issue that can start, **Focus tab** (`f`) and **Abandon** on the running worker, **Release** on a held issue |
-| **Band above the prompt** | While a worker runs: its issue, minutes, tool count and latest tool call, with **Board** and **Focus tab** |
-| **Status line** | `orchestra · 03-login-form · 4m · Edit src/login.ts` |
+| **Band above the prompt** | While a worker runs: a purple spinner beside the word *orchestra*, with a light passing over it, then the issue, minutes, tool count and latest tool call, with **Board** and **Focus tab**. The worker's own session has a band too: its job, and once it reports, the outcome. Outside the terminal the spinner stands still |
 | **Tool rows** | A running `wait` shows the worker's heartbeat. A report shows as a card: outcome, commits, issue, working tree, what's next, and the summary |
 
 ## How it behaves
 
 - **One worker at a time,** on the current branch. `dispatch` refuses to start while the working tree has uncommitted changes, unless forced.
+- **Worker tabs open in the orchestrator's window,** not whichever Ghostty window is in front. Whenever you type into the orchestrator, orchestra notes which Ghostty terminal you typed in. Until it has one, it looks for the one window with a terminal in the orchestrator's directory, not counting worker tabs. If it can't tell, the tab opens in the front window.
 - **Workers are briefed** not to ask questions, to commit, to set the issue's Status, and to call `report` last.
 - **A worker that stops without reporting** is reminded twice, then marked stalled. A turn that ends while the worker's own agents still run doesn't count.
 - **Held issues:** once a worker finishes an issue, orchestra doesn't dispatch that issue again until its file changes. This stops it from retrying a blocked issue in a loop. **Release** on the board lets the issue go without a change to the file.
@@ -169,9 +169,10 @@ npx -p typescript tsc -p .
 |---|---|
 | `hooks/register.tsx` | The hooks module: the two roles, the tools, the commands and the timers |
 | `hooks/board.ts` | Turns the state files into the board |
-| `hooks/ui.tsx` | Draws the board, the band and the tool rows |
+| `hooks/ui.tsx` | Draws the board, the bands and the tool rows |
+| `hooks/mark.ts` | The band's animated mark: the spinner and the light, as Raster cells |
 | `hooks/scratch.ts` | Reads and plans the issues |
-| `hooks/launch.ts` | The worker's command line and the AppleScript that opens its tab |
+| `hooks/launch.ts` | The worker's command line, and the AppleScript that finds the orchestrator's window and opens the tab |
 | `hooks/text.ts` | Everything the models read: tool descriptions, the worker's brief, the reminder |
 | `types/index.d.ts` | The values orchestra keeps in `$.state` |
 

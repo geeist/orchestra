@@ -1,14 +1,25 @@
 import type { Color, Elements, RenderElement, RenderSurface } from 'claude-code'
 
-import type { OrchestraBoard, OrchestraIssue, OrchestraJob, OrchestraReport, OrchestraShown, OrchestraTone } from '../types'
+import type {
+  OrchestraBoard,
+  OrchestraIssue,
+  OrchestraJob,
+  OrchestraReport,
+  OrchestraShown,
+  OrchestraTone,
+  OrchestraWorker,
+} from '../types'
+import { MARK_COLUMNS, MARK_KEY } from './mark'
 
 // What orchestra draws, as plain functions of the surface's elements and the
 // values in `$.state`: the board pane (/orchestra), the band above the
-// prompt while a worker runs, the heartbeat line under a running `wait`, and
-// the result rows of its three tools. The render hooks live in register.tsx
-// and hand the buttons their handlers.
+// prompt while a worker runs (in the worker's session too), the heartbeat
+// line under a running `wait`, and the result rows of its three tools. The
+// render hooks live in register.tsx and hand the buttons their handlers.
 
-type Els = Pick<Elements[RenderSurface], 'Box' | 'Text' | 'Button' | 'Markdown'>
+/** The surface's elements; only the terminal draws a Raster. */
+export type Els = Pick<Elements[RenderSurface], 'Box' | 'Text' | 'Button' | 'Markdown'> &
+  Partial<Pick<Elements['terminal'], 'Raster'>>
 
 /** What the buttons do. */
 export type Handlers = {
@@ -23,9 +34,12 @@ export const PANE = 'orchestra'
 
 type Tone = { icon: string; color: Color }
 
+/** orchestra's own color: a running worker, the band. */
+const PURPLE: Color = 'merged'
+
 const TONES: Record<OrchestraTone, Tone> = {
   done: { icon: '✓', color: 'success' },
-  running: { icon: '◐', color: 'claude' },
+  running: { icon: '◐', color: PURPLE },
   ready: { icon: '○', color: 'suggestion' },
   held: { icon: '⏸', color: 'warning' },
   waiting: { icon: '·', color: 'inactive' },
@@ -161,14 +175,23 @@ function recentRow(el: Els, job: OrchestraJob, width: number): RenderElement {
   )
 }
 
-// ── The band and the line under `wait` ─────────────────────────────────
+// ── The bands and the line under `wait` ────────────────────────────────
 
-export function band(el: Els, job: OrchestraJob, columns: number, on: Handlers): RenderElement {
+/** The spinner and the word: `cells` on the terminal, which the timer repaints; still elsewhere, without them. */
+export function mark(el: Els, cells: string | undefined): RenderElement {
+  const { Raster, Text } = el
+  if (cells === undefined || Raster === undefined) return <Text color={PURPLE}>{`${TONES.running.icon} orchestra`}</Text>
+
+  return <Raster key={MARK_KEY} columns={MARK_COLUMNS} rows={1} cells={cells} />
+}
+
+/** The orchestrator's band: the running worker. */
+export function band(el: Els, job: OrchestraJob, cells: string | undefined, columns: number, on: Handlers): RenderElement {
   const { Box, Text, Button } = el
 
   return (
     <Box flexDirection="row" gap={1} width={columns}>
-      <Text color={TONES.running.color}>{TONES.running.icon}</Text>
+      {mark(el, cells)}
       <Text bold>{job.slug}</Text>
       <Box flexGrow={1} flexShrink={1}>
         <Text dimColor wrap="truncate-end">
@@ -177,6 +200,34 @@ export function band(el: Els, job: OrchestraJob, columns: number, on: Handlers):
       </Box>
       <Button key="board" label="Board" onPress={() => on.board()} />
       {job.tab === '' ? null : <Button key="focus" label="Focus tab" onPress={() => on.focus(job.tab)} />}
+    </Box>
+  )
+}
+
+/** A worker's own band: its job, and once it ended, how. */
+export function workerBand(el: Els, me: OrchestraWorker, cells: string | undefined, columns: number): RenderElement {
+  const { Box, Text } = el
+  if (me.ended === undefined) {
+    return (
+      <Box flexDirection="row" gap={1} width={columns}>
+        {mark(el, cells)}
+        <Box flexShrink={1}>
+          <Text color={PURPLE} wrap="truncate-end">{`worker · ${me.job}`}</Text>
+        </Box>
+      </Box>
+    )
+  }
+  const tone = outcomeTone(me.ended)
+
+  return (
+    <Box flexDirection="row" gap={1} width={columns}>
+      <Text color={tone.color}>{tone.icon}</Text>
+      <Text color={PURPLE}>orchestra</Text>
+      <Box flexShrink={1}>
+        <Text dimColor wrap="truncate-end">
+          {me.ended === 'stalled' ? `worker · ${me.job} · stalled without a report` : `worker · ${me.job} · reported ${me.ended}`}
+        </Text>
+      </Box>
     </Box>
   )
 }
