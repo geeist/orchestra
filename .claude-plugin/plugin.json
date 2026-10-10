@@ -2,6 +2,12 @@
   "name": "orchestra",
   "version": "0.2.0",
   "description": "Runs .scratch issues one at a time in unattended worker sessions, each in its own Ghostty tab, shows them on a live board, and wakes the orchestrator when a worker reports",
+  "author": {
+    "name": "Tobias Kleemann",
+    "url": "https://github.com/geeist"
+  },
+  "repository": "https://github.com/geeist/orchestra",
+  "license": "MIT",
   "userConfig": {
     "workerPrompt": {
       "type": "string",
