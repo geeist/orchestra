@@ -1,8 +1,9 @@
 // Starting a worker: the command line typed into a new Ghostty tab, and the
 // AppleScript that opens the tab. The line goes through the person's own
 // interactive shell, so their `claude` function or alias applies and the tab
-// stays a shell afterwards. That function is also what loads this mod into the
-// worker (dotfiles: zsh/aliases.sh), so the line never names a plugin dir.
+// stays a shell afterwards. The worker loads this plugin the way the person's
+// other sessions do (installed, or a plugin dir their shell sets), so the line
+// never names a plugin dir.
 
 export type Launch = {
   permissionMode: string

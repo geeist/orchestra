@@ -1,5 +1,6 @@
 // What orchestra keeps in `$.state`: the board every drawing reads, and the
 // rows its tool calls draw. Rebuilt from the files in <git common dir>/orchestra.
+// Also the inputs of orchestra's own tools, which the hooks match on.
 
 /** How an issue stands: done, a worker on it, can start, held back, or waiting. */
 export type OrchestraTone = 'done' | 'running' | 'ready' | 'held' | 'waiting'
@@ -86,6 +87,26 @@ declare module 'claude-code' {
     orchestra: {
       board: OrchestraBoard | null
       shown: StateFamily<OrchestraShown | null>
+    }
+  }
+
+  // The engine lays the MCP tools from the session that saved the mod last:
+  // an orchestrator has no `report`, a worker none of the other three. So
+  // they are declared here, each the same as its inputSchema in register.tsx.
+  interface McpToolInputs {
+    mcp__orchestra__issues: {
+      feature?: string
+    }
+    mcp__orchestra__dispatch: {
+      issue?: string
+      force?: boolean
+    }
+    mcp__orchestra__wait: {
+      minutes?: number
+    }
+    mcp__orchestra__report: {
+      outcome: 'done' | 'blocked' | 'failed'
+      summary: string
     }
   }
 }

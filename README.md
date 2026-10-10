@@ -155,11 +155,14 @@ Run a checkout instead of the installed plugin:
 claude --plugin-dir .
 ```
 
+That first load also writes Claude Code's types to `.claude-plugin/types/`, which git ignores. The type check needs them.
+
 Check it before you commit:
 
 ```sh
 claude plugin validate .
 claude plugin test .
+npx -p typescript tsc -p .
 ```
 
 | File | What it holds |
