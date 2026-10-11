@@ -1,8 +1,8 @@
 // What orchestra keeps in `$.state`: the board every drawing reads, the
-// rows its tool calls draw, a worker's own band, and the orchestrator's
-// Ghostty terminal. The board is rebuilt from the files in
-// <git common dir>/orchestra. Also the inputs of orchestra's own tools,
-// which the hooks match on.
+// rows its tool calls draw, a worker's own band, the orchestrator's
+// Ghostty terminal, and the preview a dev session draws instead. The board
+// is rebuilt from the files in <git common dir>/orchestra. Also the inputs
+// of orchestra's own tools, which the hooks match on.
 
 /** How an issue stands: done, a worker on it, can start, held back, or waiting. */
 export type OrchestraTone = 'done' | 'running' | 'ready' | 'held' | 'waiting'
@@ -96,6 +96,12 @@ export type OrchestraShown =
   | { kind: 'started'; job: string; slug: string; title: string; path: string }
   | { kind: 'issues'; issues: OrchestraIssue[] }
 
+/** The preview a session started with ORCHESTRA_DEV=1 draws: a scenario of hooks/scenarios.ts, and the gallery's width (0 for the pane's own). */
+export type OrchestraPreview = {
+  scenario: string
+  width: number
+}
+
 declare module 'claude-code' {
   interface PluginState {
     orchestra: {
@@ -104,6 +110,7 @@ declare module 'claude-code' {
       worker: OrchestraWorker | null
       /** The id of the Ghostty terminal the person types to the orchestrator in; its window takes the worker tabs. */
       home: string | null
+      preview: OrchestraPreview | null
     }
   }
 

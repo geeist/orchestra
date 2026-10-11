@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Starts Claude Code with orchestra loaded from this checkout, to work on it:
+#
+# - Saving a file of the plugin reloads it in the running session: at once
+#   from your editor, or when the turn ends if Claude made the edit.
+# - /orchestra-preview draws the board and the band from the made-up states
+#   in hooks/scenarios.ts, and opens a gallery that draws one state whole.
+# - The installed orchestra is off for this session, so its tools don't clash.
+#
+# Run it in the repo orchestra should work in; the checkout itself is fine.
+# Arguments go on to claude. Workers this session dispatches still load the
+# installed orchestra, as every other session does.
+
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+ORCHESTRA_DEV=1 exec claude \
+  --plugin-dir "$root" \
+  --settings '{"enabledPlugins":{"orchestra@orchestra":false}}' \
+  "$@"

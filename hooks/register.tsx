@@ -1,15 +1,19 @@
 import { atom, memberOf, read, update } from 'claude-code'
 import type { EngineInterface, HookFailure, PluginOptions, Register } from 'claude-code'
 
-import type { OrchestraBoard, OrchestraReport, OrchestraShown } from '../types'
+import type { OrchestraBoard, OrchestraPreview, OrchestraReport, OrchestraShown, OrchestraWorker } from '../types'
 import { board, describe, describeCall, holds, lateReport, MAX_NUDGES, OUTCOMES, settle, table } from './board'
 import type { Job, Settled, WorkerState } from './board'
+import { gallery, GALLERY, WIDTHS } from './gallery'
+import type { Controls } from './gallery'
 import { githubIssues, namesGithub, QUERY, triageLabels } from './github'
 import type { Node, Page, Tracker } from './github'
 import { atlassianServer, FIELDS, jiraIssues, jiraScope, jql, namesJira, SEARCH_TOOL, searchPage } from './jira'
 import type { JiraNode } from './jira'
 import { commandLine, FOCUS_TAB, FRONT_TERMINAL, OPEN_TAB, workerPrompt } from './launch'
 import { FRAME_MS, frameAt, MARK_KEY, markCells, PALETTES, paletteFor } from './mark'
+import { scenarioNamed, SCENARIOS } from './scenarios'
+import type { Scenario } from './scenarios'
 import { findIssues, parseIssue, plan, sameFeature } from './scratch'
 import type { Candidate, Issue } from './scratch'
 import {
@@ -42,6 +46,12 @@ import type { Els, Handlers } from './ui'
 // docs/agents/issue-tracker.md says GitHub (`gh` fetches those), or a Jira
 // project's stories once it says Jira (the session's Atlassian MCP server
 // searches those).
+//
+// A session started with ORCHESTRA_DEV=1 (scripts/dev does) also gets
+// /orchestra-preview: while a preview runs, the board pane and the band draw
+// one of scenarios.ts's made-up states instead of the repo's, their buttons
+// only say what they would do, and the gallery pane draws that state whole.
+// The preview is kept in `$.state`, so a hot reload redraws the same one.
 
 type $ = EngineInterface
 
@@ -55,6 +65,9 @@ type Issues = { issues: Issue[]; changedAt: Map<string, number> }
 
 /** The tracker's issues. */
 type Loaded = { tracker: Tracker } & Issues
+
+/** What the board pane and the band draw, and what their buttons do. */
+type View = { board: OrchestraBoard | null; me: OrchestraWorker | null; on: Handlers }
 
 const REFRESH_MS = 5_000
 const BEAT_MS = 5_000
@@ -73,6 +86,7 @@ const boardAtom = atom({ plugin: 'orchestra', key: 'board' } as const, null)
 const shownAtom = atom({ plugin: 'orchestra', key: 'shown' } as const, null)
 const workerAtom = atom({ plugin: 'orchestra', key: 'worker' } as const, null)
 const homeAtom = atom({ plugin: 'orchestra', key: 'home' } as const, null)
+const previewAtom = atom({ plugin: 'orchestra', key: 'preview' } as const, null)
 
 // The module's own state: a reload starts it over, the files keep the rest.
 let worker: { job: string; dir: string } | undefined
@@ -86,6 +100,10 @@ let shownBoard = ''
 /** The band's site while it draws the mark as a Raster, which the animation repaints. */
 let bandSite: string | undefined
 let animation: { cancel: () => void } | undefined
+/** Whether the board last read has a worker running, which turns the mark. */
+let isWorkerRunning = false
+/** The preview's scenario, as `$.state` last had it: the timers read it without a `$` call. */
+let previewing: Scenario | undefined
 let palette = PALETTES.dark
 let beat = { activity: '', at: 0, tools: 0, isDirty: false }
 let writing: Promise<void> = Promise.resolve()
@@ -114,13 +132,15 @@ export const register: Register = (on, options) => {
 
   // ── Drawings (ui.tsx draws them; every one reads `$.state`) ───────────
 
-  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) =>
-    pane($.ui.resolve(e), await read($, boardAtom), e.props.bodyColumns, handlers($, options)),
-  )
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    const shown = await view($, options)
+
+    return pane($.ui.resolve(e), shown.board, e.props.bodyColumns, shown.on)
+  })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const me = await read($, workerAtom)
-    const job = me === null ? (await read($, boardAtom))?.running : undefined
+    const { me, board: drawn, on: buttons } = await view($, options)
+    const job = me === null ? drawn?.running : undefined
     if (e.props.hasSurvey || (me === null && job === undefined)) {
       bandSite = undefined
       return next(e)
@@ -132,7 +152,19 @@ export const register: Register = (on, options) => {
     bandSite = cells !== undefined && me?.ended === undefined ? e.requestId : undefined
     if (me !== null) return workerBand(el, me, cells, e.props.bodyColumns)
 
-    return band(el, job!, cells, e.props.bodyColumns, handlers($, options))
+    return band(el, job!, cells, e.props.bodyColumns, buttons)
+  })
+
+  on('ui.render', { component: 'Pane', requestId: GALLERY }, async ($, e) => {
+    const preview = await read($, previewAtom)
+    const scenario = scenarioOf(preview)
+    const showing =
+      preview === null || scenario === undefined
+        ? undefined
+        : { scenario, index: SCENARIOS.indexOf(scenario), count: SCENARIOS.length, width: preview.width }
+    const cells = e.surface === 'terminal' ? markCells(frameAt(await $.clock.now()), palette) : undefined
+
+    return gallery($.ui.resolve(e), showing, e.props.bodyColumns, cells, previewHandlers($), controls($))
   })
 
   on('ui.render', { component: 'ToolUse', props: { tool: 'mcp__orchestra__wait' } }, async ($, e, next) => {
@@ -279,6 +311,38 @@ export const register: Register = (on, options) => {
 
     return { text: opened.isPlaced ? 'The board is open.' : `The board waits: ${opened.reason}` }
   })
+
+  // ── The preview (ORCHESTRA_DEV=1) ─────────────────────────────────────
+
+  on('command.run', { command: 'orchestra-preview' }, async ($, e) => {
+    const name = e.args.trim()
+    if (name === 'off') {
+      await endPreview($)
+      return { text: 'The preview ended: the board and the band draw the repo again.' }
+    }
+    const current = await read($, previewAtom)
+    const scenario = name === '' ? (scenarioOf(current) ?? SCENARIOS[0]!) : scenarioNamed(name)
+    if (scenario === undefined) {
+      return { text: `No scenario "${name}". The scenarios: ${SCENARIOS.map(one => one.name).join(', ')}.` }
+    }
+
+    await setPreview($, was => ({ scenario: scenario.name, width: was?.width ?? 0 }))
+    const opened = await $.ui.open({ id: GALLERY, title: 'orchestra preview', focus: true })
+
+    return {
+      text: opened.isPlaced
+        ? `Previewing ${scenario.name}: the board and the band draw it until /orchestra-preview off. In the gallery, j and k step through the scenarios, w changes the width.`
+        : `The preview pane waits: ${opened.reason}`,
+    }
+  })
+
+  // Closing the gallery ends the preview, so the band never draws a made-up worker unasked.
+  on('ui.close', { id: GALLERY }, async ($, e, next) => {
+    const closed = await next(e)
+    await clearPreview($)
+
+    return closed
+  })
 }
 
 // ── Starting each role ──────────────────────────────────────────────────
@@ -370,6 +434,15 @@ async function startOrchestrator($: $): Promise<void> {
     name: 'orchestra',
     description: 'Open the orchestra board: the issues, the running worker and the last jobs',
   })
+  if ((await $.env.get('ORCHESTRA_DEV')) === '1') {
+    await $.command.register({
+      name: 'orchestra-preview',
+      description: "Draw orchestra's board and band from a made-up scenario, to work on the UI",
+      argumentHint: `[${SCENARIOS.map(one => one.name).join('|')}|off]`,
+    })
+  }
+  // A hot reload keeps the preview in `$.state`, and starts this module over.
+  previewing = scenarioOf(await read($, previewAtom))
   $.clock.every(REFRESH_MS, () => void tick($))
   void tick($)
 }
@@ -792,7 +865,16 @@ async function rebuild($: $): Promise<void> {
     await update($, boardAtom, () => drawn)
   }
 
-  animate($, drawn.running !== undefined)
+  isWorkerRunning = drawn.running !== undefined
+  turn($)
+}
+
+/** Turns the orchestrator's mark while its band draws a working worker: the repo's, or the preview's. */
+function turn($: $): void {
+  const shown = previewing
+  if (shown === undefined) return animate($, isWorkerRunning)
+
+  animate($, shown.worker === undefined ? shown.board?.running !== undefined : shown.worker.ended === undefined)
 }
 
 /** Starts or stops the timer that turns the band's mark. */
@@ -863,6 +945,20 @@ async function tick($: $): Promise<void> {
   }
 }
 
+// ── What the board pane and the band draw ──────────────────────────────
+
+/** The repo's board and this session's worker, or the preview's scenario while one runs. */
+async function view($: $, options: PluginOptions): Promise<View> {
+  const scenario = scenarioOf(await read($, previewAtom))
+  if (scenario !== undefined) return { board: scenario.board ?? null, me: scenario.worker ?? null, on: previewHandlers($) }
+
+  return { board: await read($, boardAtom), me: await read($, workerAtom), on: handlers($, options) }
+}
+
+function scenarioOf(preview: { scenario: string } | null): Scenario | undefined {
+  return preview === null ? undefined : SCENARIOS.find(one => one.name === preview.scenario)
+}
+
 // ── The buttons ─────────────────────────────────────────────────────────
 
 /** What the drawings' buttons do; each says how it went in a toast. */
@@ -874,6 +970,55 @@ function handlers($: $, options: PluginOptions): Handlers {
     release: id => void toast($, release($, id)),
     board: () => void $.ui.open({ id: PANE, title: 'orchestra' }),
   }
+}
+
+/** The preview's buttons only say what they would do: its issues and jobs are made up. */
+function previewHandlers($: $): Handlers {
+  const say = (text: string) => $.ui.toast(`Preview: ${text}`)
+
+  return {
+    dispatch: path => say(path === undefined ? 'would dispatch the next issue' : `would dispatch ${path}`),
+    focus: tab => say(`would focus the worker's Ghostty tab ${tab}`),
+    abandon: id => say(`would stop tracking job ${id}`),
+    release: id => say(`would release the issue job ${id} holds`),
+    board: () => void $.ui.open({ id: PANE, title: 'orchestra' }),
+  }
+}
+
+/** The gallery's buttons: step through the scenarios, change the width, end the preview. */
+function controls($: $): Controls {
+  const step = (by: number) =>
+    void setPreview($, was => {
+      if (was === null) return null
+      const at = SCENARIOS.findIndex(one => one.name === was.scenario)
+      return { ...was, scenario: SCENARIOS[(at + by + SCENARIOS.length) % SCENARIOS.length]!.name }
+    })
+
+  return {
+    previous: () => step(-1),
+    next: () => step(1),
+    width: () =>
+      void setPreview($, was =>
+        was === null ? null : { ...was, width: WIDTHS[(WIDTHS.indexOf(was.width) + 1) % WIDTHS.length]! },
+      ),
+    end: () => void endPreview($),
+  }
+}
+
+/** Writes the preview, and turns the band's mark if the scenario's band works. */
+async function setPreview($: $, change: (was: OrchestraPreview | null) => OrchestraPreview | null): Promise<void> {
+  previewing = scenarioOf(await update($, previewAtom, change))
+  turn($)
+}
+
+async function endPreview($: $): Promise<void> {
+  await clearPreview($)
+  await $.ui.close({ id: GALLERY })
+}
+
+async function clearPreview($: $): Promise<void> {
+  if ((await read($, previewAtom)) === null) return
+  await setPreview($, () => null)
 }
 
 async function dispatchLine($: $, options: PluginOptions, path: string | undefined): Promise<string> {

@@ -262,13 +262,25 @@ rm -r "$(git rev-parse --path-format=absolute --git-common-dir)/orchestra"
 
 ## Development
 
-Run a checkout instead of the installed plugin:
+Run a checkout instead of the installed plugin, from the repo orchestra should work in:
 
 ```sh
-claude --plugin-dir .
+~/path/to/orchestra/scripts/dev
 ```
 
-That first load also writes Claude Code's types to `.claude-plugin/types/`, which git ignores. The type check needs them.
+It starts `claude` with this checkout as a `--plugin-dir`, the installed orchestra switched off, and `ORCHESTRA_DEV=1`. Arguments go on to `claude`. The first load also writes Claude Code's types to `.claude-plugin/types/`, which git ignores. The type check needs them.
+
+**Hot reload.** Saving a file of the plugin reloads it in that session: right away from your editor, or when the turn ends if Claude made the edit. Values in `$.state` stay, and the module's own variables start over. Workers this session dispatches still load the installed orchestra.
+
+**Preview.** `/orchestra-preview [scenario]` draws the board and the band from a made-up state instead of the repo, so you can look at each state without running a worker. It opens a gallery pane that draws the whole state at once: the board, the band, the line under a running `wait`, and the cards orchestra's tools leave in the transcript. A reload redraws the same scenario, so you can edit `hooks/ui.tsx` and watch the change land.
+
+| In the gallery | Does |
+|---|---|
+| `j` / `k` | Next / previous scenario |
+| `w` | Draw at the pane's width, then at 100, 80, 60 and 40 columns |
+| `x` | End the preview. So does closing the gallery or `/orchestra-preview off` |
+
+While a preview runs, the buttons on the board and the band only say what they would do. The scenarios live in `hooks/scenarios.ts`: add one for each state a change should be checked in.
 
 Check it before you commit:
 
@@ -283,6 +295,8 @@ npx -p typescript tsc -p .
 | `hooks/register.tsx` | The hooks module: the two roles, the tools, the commands and the timers |
 | `hooks/board.ts` | Turns the state files into the board |
 | `hooks/ui.tsx` | Draws the board, the bands and the tool rows |
+| `hooks/scenarios.ts` | The preview's made-up states |
+| `hooks/gallery.tsx` | Draws the preview's gallery pane |
 | `hooks/mark.ts` | The band's animated mark: the spinner and the light, as Raster cells |
 | `hooks/scratch.ts` | Reads the `.scratch` issues, and plans the issues of either tracker |
 | `hooks/github.ts` | Reads the GitHub issues: the query, the tickets, their labels and blockers |
@@ -290,6 +304,7 @@ npx -p typescript tsc -p .
 | `hooks/launch.ts` | The worker's command line, and the AppleScript that finds the orchestrator's window and opens the tab |
 | `hooks/text.ts` | Everything the models read: tool descriptions, the worker's brief, the reminder |
 | `types/index.d.ts` | The values orchestra keeps in `$.state` |
+| `scripts/dev` | Starts a session with this checkout loaded, for hot reload and the preview |
 
 ## License
 
