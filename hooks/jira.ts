@@ -135,10 +135,11 @@ export function searchPage(result: {
   return value
 }
 
-/** The issues the board plans, and when each last changed (a hold ends once it does). */
+/** The issues the board plans, and when each last changed (a hold ends once it does); `site` hosts their pages. */
 export function jiraIssues(
   nodes: readonly JiraNode[],
   labels: Labels,
+  site: string,
 ): { issues: Issue[]; changedAt: Map<string, number> } {
   // A sub-task's parent is its story, which stays a ticket.
   const tickets = new Map(nodes.filter(node => !isSubtask(node)).map(node => [node.key, node]))
@@ -171,6 +172,7 @@ export function jiraIssues(
       blockedBy: [...new Set([...linked, ...named])].sort((a, b) => a.localeCompare(b, undefined, { numeric: true })),
       ...boxes(text),
       isDone: isDone(node),
+      url: `https://${site}/browse/${node.key}`,
     })
     // Jira writes the offset without its colon (`+0200`).
     const updated = fields.updated?.replace(/([+-]\d\d)(\d\d)$/, '$1:$2')

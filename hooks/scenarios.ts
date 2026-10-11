@@ -30,7 +30,9 @@ export type Scenario = {
 // ── Building blocks ─────────────────────────────────────────────────────
 
 function scratch(feature: string, slug: string, title: string, tone: OrchestraTone, reason: string): OrchestraIssue {
-  return { path: `.scratch/${feature}/issues/${slug}.md`, feature, slug, title, tone, reason }
+  const path = `.scratch/${feature}/issues/${slug}.md`
+
+  return { path, feature, slug, title, tone, reason, url: `file:///Users/you/app/${path}` }
 }
 
 function job(issue: OrchestraIssue, id: string, given: Partial<OrchestraJob>): OrchestraJob {
@@ -39,6 +41,7 @@ function job(issue: OrchestraIssue, id: string, given: Partial<OrchestraJob>): O
     issue: issue.path,
     slug: issue.slug,
     title: issue.title,
+    ...(issue.url === undefined ? {} : { url: issue.url }),
     tab: 'tab-7',
     minutes: 0,
     phase: 'finished',
@@ -89,6 +92,16 @@ const BOARD: OrchestraBoard = {
   next: LOGIN.form.path,
 }
 
+const ONBOARDING = {
+  welcome: scratch('onboarding', '01-welcome-mail', 'Welcome mail', 'done', 'done'),
+  tour: scratch('onboarding', '02-product-tour', 'Product tour', 'done', 'done'),
+}
+
+/** Every issue the way `change` turns it. */
+function each(issues: readonly OrchestraIssue[], change: (one: OrchestraIssue) => Partial<OrchestraIssue>): OrchestraIssue[] {
+  return issues.map(one => ({ ...one, ...change(one) }))
+}
+
 /** The board while a worker runs the login form: nothing else can start. */
 function runningBoard(running: OrchestraJob): OrchestraBoard {
   const form = { ...LOGIN.form, tone: 'running' as const, reason: `a worker runs it (job ${running.id})` }
@@ -115,6 +128,63 @@ export const SCENARIOS: readonly Scenario[] = [
     about: 'Just dispatched: no worker session has written its file yet',
     board: runningBoard({ ...RUNNING_FORM, phase: 'starting', minutes: 1, activity: undefined, tools: undefined }),
     shown: [{ kind: 'started', job: RUNNING_FORM.id, slug: LOGIN.form.slug, title: LOGIN.form.title, path: LOGIN.form.path }],
+  },
+  {
+    name: 'finish',
+    about: 'Two issues just finished, one the last of its lane: lines fill, stops sparkle, confetti, Clawd cheers (every 6s)',
+    board: {
+      ...BOARD,
+      issues: [
+        LOGIN.schema,
+        { ...LOGIN.form, tone: 'done', reason: 'done', doneAt: 0 },
+        { ...LOGIN.reset, tone: 'ready', reason: 'can start' },
+        LOGIN.remember,
+        ONBOARDING.welcome,
+        { ...ONBOARDING.tour, doneAt: 0 },
+        ...Object.values(BILLING),
+      ],
+      recent: [{ ...RUNNING_FORM, phase: 'finished', minutes: 14, outcome: 'done' }, ...RECENT.slice(0, 2)],
+      next: LOGIN.reset.path,
+    },
+  },
+  {
+    name: 'stuck',
+    about: 'Nothing can start and an issue is held: Clawd waves for help',
+    board: {
+      ...BOARD,
+      issues: [
+        LOGIN.schema,
+        { ...LOGIN.form, tone: 'waiting', reason: 'status is needs-info' },
+        LOGIN.reset,
+        LOGIN.remember,
+        ...Object.values(BILLING),
+      ],
+      next: undefined,
+    },
+  },
+  {
+    name: 'asleep',
+    about: 'Every issue waits on another or on triage: Clawd sleeps',
+    board: {
+      ...BOARD,
+      issues: each(Object.values(BILLING), () => ({})),
+      recent: [],
+      next: undefined,
+    },
+  },
+  {
+    name: 'party',
+    about: 'Every issue is done: each lane folds to its track, Clawd dances',
+    board: {
+      ...BOARD,
+      issues: each([...Object.values(LOGIN), ...Object.values(ONBOARDING), ...Object.values(BILLING)], one => ({
+        tone: 'done',
+        reason: 'done',
+        heldBy: undefined,
+        ...(one === BILLING.invoices ? { doneAt: 0 } : {}),
+      })),
+      next: undefined,
+    },
   },
   {
     name: 'reports',
@@ -176,12 +246,12 @@ export const SCENARIOS: readonly Scenario[] = [
     board: {
       tracker: 'github',
       issues: [
-        { path: '#41', feature: '#12', featureTitle: 'Spec: sign in with a passkey', slug: '#41', title: 'Register a passkey', tone: 'done', reason: 'done' },
-        { path: '#42', feature: '#12', featureTitle: 'Spec: sign in with a passkey', slug: '#42', title: 'Sign in with the passkey', tone: 'ready', reason: 'can start' },
-        { path: '#43', feature: '#12', featureTitle: 'Spec: sign in with a passkey', slug: '#43', title: 'Remove a passkey', tone: 'waiting', reason: 'waits on #42' },
-        { path: '#57', feature: '', slug: '#57', title: 'Typo on the settings page', tone: 'waiting', reason: 'status is needs-info' },
+        { path: '#41', url: 'https://github.com/acme/app/issues/41', feature: '#12', featureTitle: 'Spec: sign in with a passkey', slug: '#41', title: 'Register a passkey', tone: 'done', reason: 'done' },
+        { path: '#42', url: 'https://github.com/acme/app/issues/42', feature: '#12', featureTitle: 'Spec: sign in with a passkey', slug: '#42', title: 'Sign in with the passkey', tone: 'ready', reason: 'can start' },
+        { path: '#43', url: 'https://github.com/acme/app/issues/43', feature: '#12', featureTitle: 'Spec: sign in with a passkey', slug: '#43', title: 'Remove a passkey', tone: 'waiting', reason: 'waits on #42' },
+        { path: '#57', url: 'https://github.com/acme/app/issues/57', feature: '', slug: '#57', title: 'Typo on the settings page', tone: 'waiting', reason: 'status is needs-info' },
       ],
-      recent: [job({ path: '#41', feature: '#12', slug: '#41', title: 'Register a passkey', tone: 'done', reason: 'done' }, '12-41-m2a1', { minutes: 22, outcome: 'done' })],
+      recent: [job({ path: '#41', url: 'https://github.com/acme/app/issues/41', feature: '#12', slug: '#41', title: 'Register a passkey', tone: 'done', reason: 'done' }, '12-41-m2a1', { minutes: 22, outcome: 'done' })],
       next: '#42',
     },
   },
@@ -191,14 +261,15 @@ export const SCENARIOS: readonly Scenario[] = [
     board: {
       tracker: 'jira',
       issues: [
-        { path: 'CORE-130', feature: 'CORE-123', featureTitle: 'Payout reconciliation', slug: 'CORE-130', title: 'Import the payout file', tone: 'done', reason: 'done' },
-        { path: 'CORE-131', feature: 'CORE-123', featureTitle: 'Payout reconciliation', slug: 'CORE-131', title: 'Match payouts to bookings', tone: 'running', reason: 'a worker runs it (job CORE-123-131-m2c4)' },
-        { path: 'CORE-132', feature: 'CORE-123', featureTitle: 'Payout reconciliation', slug: 'CORE-132', title: 'Report the unmatched', tone: 'waiting', reason: 'waits on CORE-131' },
+        { path: 'CORE-130', url: 'https://acme.atlassian.net/browse/CORE-130', feature: 'CORE-123', featureTitle: 'Payout reconciliation', slug: 'CORE-130', title: 'Import the payout file', tone: 'done', reason: 'done' },
+        { path: 'CORE-131', url: 'https://acme.atlassian.net/browse/CORE-131', feature: 'CORE-123', featureTitle: 'Payout reconciliation', slug: 'CORE-131', title: 'Match payouts to bookings', tone: 'running', reason: 'a worker runs it (job CORE-123-131-m2c4)' },
+        { path: 'CORE-132', url: 'https://acme.atlassian.net/browse/CORE-132', feature: 'CORE-123', featureTitle: 'Payout reconciliation', slug: 'CORE-132', title: 'Report the unmatched', tone: 'waiting', reason: 'waits on CORE-131' },
       ],
       running: {
         id: 'CORE-123-131-m2c4',
         issue: 'CORE-131',
         slug: 'CORE-131',
+        url: 'https://acme.atlassian.net/browse/CORE-131',
         title: 'Match payouts to bookings',
         tab: 'tab-3',
         minutes: 24,

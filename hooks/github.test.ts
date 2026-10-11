@@ -8,6 +8,7 @@ import { brief } from './text'
 
 const node = (number: number, extra: Partial<Node> = {}): Node => ({
   number,
+  url: `https://github.com/acme/app/issues/${number}`,
   title: `Issue ${number}`,
   body: '',
   state: 'OPEN',
@@ -72,7 +73,13 @@ describe('githubIssues', () => {
   test('a parent is the feature of its tickets, and no ticket itself', () => {
     expect(byPath.has('#10')).toBe(false)
     expect(byPath.has('#20')).toBe(false)
-    expect(byPath.get('#12')).toMatchObject({ feature: '#10', featureTitle: 'Spec 10', number: '12', slug: '#12' })
+    expect(byPath.get('#12')).toMatchObject({
+      feature: '#10',
+      featureTitle: 'Spec 10',
+      number: '12',
+      slug: '#12',
+      url: 'https://github.com/acme/app/issues/12',
+    })
     expect(byPath.get('#21')).toMatchObject({ feature: '#20', featureTitle: 'Search', blockedBy: [] })
   })
 

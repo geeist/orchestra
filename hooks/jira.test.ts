@@ -161,7 +161,7 @@ describe('searchPage', () => {
 })
 
 describe('jiraIssues', () => {
-  const { issues, changedAt } = jiraIssues(NODES, triageLabels(undefined))
+  const { issues, changedAt } = jiraIssues(NODES, triageLabels(undefined), 'quirion.atlassian.net')
   const byPath = new Map(issues.map(issue => [issue.path, issue]))
 
   test('an epic is the feature of its stories, and no ticket itself', () => {
@@ -172,6 +172,7 @@ describe('jiraIssues', () => {
       number: '12',
       slug: 'CORE-12',
       ref: 'CORE-12',
+      url: 'https://quirion.atlassian.net/browse/CORE-12',
     })
     expect(byPath.get('CORE-20')?.feature).toBe('')
   })
@@ -213,7 +214,7 @@ describe('jiraIssues', () => {
 })
 
 describe('findIssues in Jira', () => {
-  const { issues } = jiraIssues(NODES, triageLabels(undefined))
+  const { issues } = jiraIssues(NODES, triageLabels(undefined), 'quirion.atlassian.net')
 
   test('by key, number, link and epic/key', () => {
     for (const ref of ['CORE-12', 'core-12', '12', 'https://quirion.atlassian.net/browse/CORE-12', 'CORE-10/CORE-12']) {

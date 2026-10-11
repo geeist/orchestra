@@ -34,6 +34,8 @@ export type Issue = {
   doneBoxes: number
   /** A done status, or every checkbox ticked (how 01 and 02 were closed); closed on GitHub, in the Done category in Jira. */
   isDone: boolean
+  /** Where the issue opens: its file as a `file:` URL, its page on GitHub, or the story's in Jira. */
+  url?: string
 }
 
 export type Candidate = Issue & { canStart: boolean; reason: string }
@@ -113,6 +115,11 @@ export function findIssues<T extends Issue>(issues: readonly T[], ref: string): 
 /** Whether `name` names the feature: its folder, its parent issue with or without the `#`, or its epic. */
 export function sameFeature(feature: string, name: string): boolean {
   return feature.replace(/^#/, '').toLowerCase() === name.replace(/^#/, '').toLowerCase()
+}
+
+/** The `file:` URL of an absolute path, each part percent-encoded. */
+export function fileUrl(path: string): string {
+  return `file://${path.split('/').map(encodeURIComponent).join('/')}`
 }
 
 /** The value of a `Name: value` line, its bold stars dropped. */

@@ -34,6 +34,7 @@ export const ON_BOARD: readonly Role[] = ['ready-for-agent', 'needs-info', 'read
 /** One issue as QUERY returns it. */
 export type Node = {
   number: number
+  url: string
   title: string
   body: string
   state: 'OPEN' | 'CLOSED'
@@ -71,7 +72,7 @@ export const QUERY = `query($owner: String!, $repo: String!, $after: String, $wi
   }
 }
 fragment ticket on Issue {
-  number title body state updatedAt
+  number url title body state updatedAt
   labels(first: 20) { nodes { name } }
   parent { number title }
   subIssuesSummary { total }
@@ -131,6 +132,7 @@ export function githubIssues(
       blockedBy: [...blockers].sort((a, b) => a - b).map(number => `#${number}`),
       ...boxes(node.body),
       isDone: node.state === 'CLOSED',
+      url: node.url,
     })
     changedAt.set(path, Date.parse(node.updatedAt))
   }

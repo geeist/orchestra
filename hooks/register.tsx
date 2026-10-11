@@ -1,8 +1,8 @@
 import { atom, memberOf, read, update } from 'claude-code'
 import type { EngineInterface, HookFailure, PluginOptions, Register } from 'claude-code'
 
-import type { OrchestraBoard, OrchestraPreview, OrchestraReport, OrchestraShown, OrchestraWorker } from '../types'
-import { board, describe, describeCall, holds, lateReport, MAX_NUDGES, OUTCOMES, settle, table } from './board'
+import type { OrchestraBoard, OrchestraPreview, OrchestraReport, OrchestraShown, OrchestraTone, OrchestraWorker } from '../types'
+import { board, describe, describeCall, holds, lateReport, MAX_NUDGES, OUTCOMES, settle, stampDone, table } from './board'
 import type { Job, Settled, WorkerState } from './board'
 import { gallery, GALLERY, WIDTHS } from './gallery'
 import type { Controls } from './gallery'
@@ -11,10 +11,12 @@ import type { Node, Page, Tracker } from './github'
 import { atlassianServer, FIELDS, jiraIssues, jiraScope, jql, namesJira, SEARCH_TOOL, searchPage } from './jira'
 import type { JiraNode } from './jira'
 import { commandLine, FOCUS_TAB, FRONT_TERMINAL, OPEN_TAB, workerPrompt } from './launch'
-import { FRAME_MS, frameAt, MARK_KEY, markCells, PALETTES, paletteFor } from './mark'
+import { FRAME_MS, MARK_KEY } from './mark'
+import { cellsOf, colorsFor, REPLAY_MS } from './motion'
+import type { Sprite } from './motion'
 import { scenarioNamed, SCENARIOS } from './scenarios'
 import type { Scenario } from './scenarios'
-import { findIssues, parseIssue, plan, sameFeature } from './scratch'
+import { fileUrl, findIssues, parseIssue, plan, sameFeature } from './scratch'
 import type { Candidate, Issue } from './scratch'
 import {
   brief,
@@ -27,7 +29,7 @@ import {
   WAIT_DESCRIPTION,
 } from './text'
 import { band, pane, PANE, shownRow, waitRow, workerBand } from './ui'
-import type { Els, Handlers } from './ui'
+import type { Els, Handlers, Motion } from './ui'
 
 // One mod, two roles. A session started with ORCHESTRA_JOB set is a worker:
 // it gets the `report` tool, writes a heartbeat of its tool calls, and is
@@ -66,10 +68,15 @@ type Issues = { issues: Issue[]; changedAt: Map<string, number> }
 /** The tracker's issues. */
 type Loaded = { tracker: Tracker } & Issues
 
-/** What the board pane and the band draw, and what their buttons do. */
-type View = { board: OrchestraBoard | null; me: OrchestraWorker | null; on: Handlers }
+/** What the board pane and the band draw, what their buttons do, and how often the preview replays a finish. */
+type View = { board: OrchestraBoard | null; me: OrchestraWorker | null; on: Handlers; loop?: number }
+
+/** A drawing's Rasters, by key: what each draws, and the cells it last sent. */
+type Site = { sprites: Map<string, { sprite: Sprite; cells: string }>; changedAt: number }
 
 const REFRESH_MS = 5_000
+/** A drawing whose Rasters stayed the same this long is let go: nothing on it moves. */
+const STILL_MS = 10_000
 const BEAT_MS = 5_000
 const WAIT_STEP_SECONDS = 5
 /** How long after a job settled a late report is still looked for. */
@@ -97,14 +104,17 @@ let waits = 0
 let isTurnRunning = false
 let isTicking = false
 let shownBoard = ''
-/** The band's site while it draws the mark as a Raster, which the animation repaints. */
-let bandSite: string | undefined
+/**
+ * The Rasters each drawing shows, by its requestId: the band's mark, and on
+ * the board Clawd, the tracks and the icons that move. The animation
+ * repaints them, and sends only the cells that changed.
+ */
+const sites = new Map<string, Site>()
 let animation: { cancel: () => void } | undefined
-/** Whether the board last read has a worker running, which turns the mark. */
-let isWorkerRunning = false
-/** The preview's scenario, as `$.state` last had it: the timers read it without a `$` call. */
-let previewing: Scenario | undefined
-let palette = PALETTES.dark
+/** When this session saw each issue turn done, and each issue's tone on the board before. */
+const doneStamps = new Map<string, number>()
+let lastTones: Map<string, OrchestraTone> | undefined
+let colors = colorsFor(undefined)
 let beat = { activity: '', at: 0, tools: 0, isDirty: false }
 let writing: Promise<void> = Promise.resolve()
 let refreshing: Promise<void> | undefined
@@ -116,7 +126,7 @@ export const register: Register = (on, options) => {
     const job = await $.env.get('ORCHESTRA_JOB')
     const dir = await $.env.get('ORCHESTRA_DIR')
     const theme = await $.config.list().then(rows => rows.find(row => row.key === 'theme')?.value, () => undefined)
-    palette = paletteFor(theme)
+    colors = colorsFor(theme)
     // The band took over from the status line: clear one an earlier version pinned before this reload.
     $.ui.status(undefined)
 
@@ -135,21 +145,21 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const shown = await view($, options)
 
-    return pane($.ui.resolve(e), shown.board, e.props.bodyColumns, shown.on)
+    return pane($.ui.resolve(e), shown.board, e.props.bodyColumns, shown.on, await motionFor($, e, shown.loop))
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const { me, board: drawn, on: buttons } = await view($, options)
+    const { me, board: drawn, on: buttons, loop } = await view($, options)
     const job = me === null ? drawn?.running : undefined
     if (e.props.hasSurvey || (me === null && job === undefined)) {
-      bandSite = undefined
+      sites.delete(e.requestId)
       return next(e)
     }
 
     const el: Els = $.ui.resolve(e)
-    // Only the terminal draws a Raster, so only there the mark turns.
-    const cells = e.surface === 'terminal' ? markCells(frameAt(await $.clock.now()), palette) : undefined
-    bandSite = cells !== undefined && me?.ended === undefined ? e.requestId : undefined
+    // The mark turns while the worker works; a worker's band that ended draws none.
+    const motion = await motionFor($, e, loop)
+    const cells = me?.ended === undefined ? motion(MARK_KEY, { kind: 'mark' }) : undefined
     if (me !== null) return workerBand(el, me, cells, e.props.bodyColumns)
 
     return band(el, job!, cells, e.props.bodyColumns, buttons)
@@ -162,9 +172,9 @@ export const register: Register = (on, options) => {
       preview === null || scenario === undefined
         ? undefined
         : { scenario, index: SCENARIOS.indexOf(scenario), count: SCENARIOS.length, width: preview.width }
-    const cells = e.surface === 'terminal' ? markCells(frameAt(await $.clock.now()), palette) : undefined
+    const motion = await motionFor($, e, REPLAY_MS)
 
-    return gallery($.ui.resolve(e), showing, e.props.bodyColumns, cells, previewHandlers($), controls($))
+    return gallery($.ui.resolve(e), showing, e.props.bodyColumns, motion, previewHandlers($), controls($))
   })
 
   on('ui.render', { component: 'ToolUse', props: { tool: 'mcp__orchestra__wait' } }, async ($, e, next) => {
@@ -367,7 +377,6 @@ async function startWorker($: $, job: string): Promise<void> {
   beat = { ...beat, tools: current?.tools ?? 0 }
   if (current === undefined || current.state === 'running') {
     await update($, workerAtom, () => ({ job }))
-    animate($, true)
   } else {
     await endWorker($, current.state === 'reported' ? (current.outcome ?? 'unknown') : current.state)
   }
@@ -376,7 +385,6 @@ async function startWorker($: $, job: string): Promise<void> {
 
 /** The worker's band says how it ended, and stops turning. */
 async function endWorker($: $, ended: string): Promise<void> {
-  animate($, false)
   if (worker !== undefined) await update($, workerAtom, () => ({ job: worker!.job, ended }))
 }
 
@@ -441,8 +449,6 @@ async function startOrchestrator($: $): Promise<void> {
       argumentHint: `[${SCENARIOS.map(one => one.name).join('|')}|off]`,
     })
   }
-  // A hot reload keeps the preview in `$.state`, and starts this module over.
-  previewing = scenarioOf(await read($, previewAtom))
   $.clock.every(REFRESH_MS, () => void tick($))
   void tick($)
 }
@@ -527,7 +533,7 @@ async function loadIssues($: $, top: string, isFresh: boolean): Promise<Loaded> 
     const issues =
       tracker.kind === 'github'
         ? fetchGithub($, top).then(nodes => githubIssues(nodes, tracker.labels))
-        : fetchJira($, tracker).then(nodes => jiraIssues(nodes, tracker.labels))
+        : fetchJira($, tracker).then(nodes => jiraIssues(nodes, tracker.labels, tracker.site))
     fetched = { at: now, key, issues }
   }
 
@@ -602,7 +608,7 @@ async function loadScratch($: $, top: string): Promise<Issues> {
     for (const file of await $.fs.list(dir)) {
       if (file.kind !== 'file' || !file.name.endsWith('.md')) continue
       const path = `.scratch/${feature.name}/issues/${file.name}`
-      issues.push(parseIssue(path, await $.fs.read(`${top}/${path}`)))
+      issues.push({ ...parseIssue(path, await $.fs.read(`${top}/${path}`)), url: fileUrl(`${top}/${path}`) })
       changedAt.set(path, file.mtimeMs)
     }
   }
@@ -855,8 +861,12 @@ async function rebuild($: $): Promise<void> {
     if (job.session === session) void notify($, `${job.slug}: reported ${late.outcome} after it was marked ${job.outcome}`)
   }
 
+  const built = board({ list, jobs, workers, session, now })
+  const issues = stampDone(built.issues, lastTones, doneStamps, now)
+  if (!(loaded instanceof Error)) lastTones = new Map(built.issues.map(one => [one.path, one.tone]))
   const drawn: OrchestraBoard = {
-    ...board({ list, jobs, workers, session, now }),
+    ...built,
+    issues,
     ...(loaded instanceof Error ? { problem: loaded.message } : { tracker: loaded.tracker.kind }),
   }
   const json = JSON.stringify(drawn)
@@ -864,34 +874,59 @@ async function rebuild($: $): Promise<void> {
     shownBoard = json
     await update($, boardAtom, () => drawn)
   }
-
-  isWorkerRunning = drawn.running !== undefined
-  turn($)
 }
 
-/** Turns the orchestrator's mark while its band draws a working worker: the repo's, or the preview's. */
-function turn($: $): void {
-  const shown = previewing
-  if (shown === undefined) return animate($, isWorkerRunning)
+/**
+ * The drawing's motion: each sprite it draws is kept for the animation to
+ * repaint, and the animation starts. Only the terminal draws a Raster.
+ */
+async function motionFor($: $, e: { requestId: string; surface: string }, loop: number | undefined): Promise<Motion> {
+  sites.delete(e.requestId)
+  if (e.surface !== 'terminal') return () => undefined
+  const now = await $.clock.now()
+  const site: Site = { sprites: new Map(), changedAt: now }
+  sites.set(e.requestId, site)
+  animation ??= $.clock.every(FRAME_MS, () => void paint($))
 
-  animate($, shown.worker === undefined ? shown.board?.running !== undefined : shown.worker.ended === undefined)
-}
-
-/** Starts or stops the timer that turns the band's mark. */
-function animate($: $, isOn: boolean): void {
-  if (isOn && animation === undefined) animation = $.clock.every(FRAME_MS, () => void paint($))
-  if (!isOn && animation !== undefined) {
-    animation.cancel()
-    animation = undefined
+  return (key, sprite) => {
+    const looped = loop === undefined || sprite.kind === 'mark' ? sprite : { ...sprite, loop }
+    const cells = cellsOf(looped, now, colors)
+    site.sprites.set(key, { sprite: looped, cells })
+    return cells
   }
 }
 
-/** Repaints the mark in the band, if the band draws it; a band not mounted yet, or collapsed, refuses. */
+/**
+ * Repaints each Raster whose cells changed. A drawing that refuses one is
+ * gone, and one where nothing moved for a while is let go; the timer stops
+ * once none is left. A drawing comes back each time it draws again.
+ */
 async function paint($: $): Promise<void> {
-  const site = bandSite
-  if (site === undefined) return
-  const cells = markCells(frameAt(await $.clock.now()), palette)
-  await $.ui.blit({ requestId: site, key: MARK_KEY, cells }).catch(() => undefined)
+  try {
+    const now = await $.clock.now()
+    for (const [id, site] of sites) {
+      for (const [key, shown] of site.sprites) {
+        const cells = cellsOf(shown.sprite, now, colors)
+        if (cells === shown.cells) continue
+        shown.cells = cells
+        site.changedAt = now
+        const blitted = await $.ui.blit({ requestId: id, key, cells }).catch(() => ({ deny: 'failed' }))
+        if (blitted.deny !== undefined) {
+          if (sites.get(id) === site) sites.delete(id)
+          break
+        }
+      }
+      if (now - site.changedAt > STILL_MS && sites.get(id) === site) sites.delete(id)
+    }
+  } catch (error) {
+    // Whatever broke, the drawings stand still until they draw again.
+    sites.clear()
+    $.ui.log(`orchestra: the animation stopped: ${message(error)}`, { to: 'debug' })
+  }
+  if (sites.size === 0) {
+    animation?.cancel()
+    animation = undefined
+  }
 }
 
 /**
@@ -950,7 +985,9 @@ async function tick($: $): Promise<void> {
 /** The repo's board and this session's worker, or the preview's scenario while one runs. */
 async function view($: $, options: PluginOptions): Promise<View> {
   const scenario = scenarioOf(await read($, previewAtom))
-  if (scenario !== undefined) return { board: scenario.board ?? null, me: scenario.worker ?? null, on: previewHandlers($) }
+  if (scenario !== undefined) {
+    return { board: scenario.board ?? null, me: scenario.worker ?? null, on: previewHandlers($), loop: REPLAY_MS }
+  }
 
   return { board: await read($, boardAtom), me: await read($, workerAtom), on: handlers($, options) }
 }
@@ -1005,10 +1042,9 @@ function controls($: $): Controls {
   }
 }
 
-/** Writes the preview, and turns the band's mark if the scenario's band works. */
+/** Writes the preview: the board, the band and the gallery draw it. */
 async function setPreview($: $, change: (was: OrchestraPreview | null) => OrchestraPreview | null): Promise<void> {
-  previewing = scenarioOf(await update($, previewAtom, change))
-  turn($)
+  await update($, previewAtom, change)
 }
 
 async function endPreview($: $): Promise<void> {

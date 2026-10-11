@@ -1,6 +1,7 @@
-import { describe, expect, test } from 'claude-code/testing'
+import { describe, expect, mock, test } from 'claude-code/testing'
 
 import type { RenderElement } from 'claude-code'
+import type { Engine } from 'claude-code/testing'
 
 import type { OrchestraBoard, OrchestraShown } from '../types'
 
@@ -28,6 +29,7 @@ const BOARD: OrchestraBoard = {
       slug: '02-b',
       title: '02: B',
       tone: 'running',
+      url: 'file:///repo/.scratch/s/issues/02-b.md',
       reason: 'a worker runs it (job s-02-x)',
     },
     {
@@ -45,6 +47,7 @@ const BOARD: OrchestraBoard = {
     issue: '.scratch/s/issues/02-b.md',
     slug: '02-b',
     title: '02: B',
+    url: 'file:///repo/.scratch/s/issues/02-b.md',
     tab: 'tab-9',
     minutes: 4,
     phase: 'running',
@@ -63,6 +66,7 @@ const ENGINE: RenderElement = { type: 'Text', children: ['engine'] }
 describe('board pane', () => {
   for (const surface of SURFACES) {
     test(`draws the running job and focuses its tab (${surface})`, async ($, on) => {
+      mock.clock(on)
       const ran: string[][] = []
       const toasts: string[] = []
       on('state.get', { plugin: 'orchestra', key: 'board' }, () => ({ value: { value: BOARD, version: 1 } }))
@@ -86,6 +90,9 @@ describe('board pane', () => {
       expect((await ui.find({ text: 'Edit hooks/ui.tsx' }))?.text).toContain('30 tools')
       expect(await ui.find({ key: 'release:.scratch/s/issues/03-c.md' })).toBeDefined()
       expect(await ui.find({ key: 'next' })).toBeUndefined()
+      // The desktop opens no file: link, so the issue's file is its name there.
+      expect(await ui.findAll({ type: 'Link', text: '02-b' })).toHaveLength(surface === 'terminal' ? 2 : 0)
+      expect(await ui.find({ type: 'Link', text: '01-a' })).toBeUndefined()
 
       await ui.press({ key: 'focus' })
 
@@ -93,6 +100,107 @@ describe('board pane', () => {
       expect(toasts).toEqual(['Focused the worker tab.'])
     })
   }
+})
+
+describe('board layout', () => {
+  const mount = async ($: Engine, bodyColumns: number, surface: 'terminal' | 'desktop' = 'terminal') =>
+    $.ui.mount({
+      plugin: 'orchestra',
+      surface,
+      component: 'Pane',
+      requestId: 'orchestra',
+      props: { title: 'orchestra', isFocused: false, bodyColumns, placement: 'dock', scroll: SCROLL, view: {} },
+    })
+
+  test('Clawd and the track move on the terminal, a row per issue under them', async ($, on) => {
+    mock.clock(on)
+    on('state.get', { plugin: 'orchestra', key: 'board' }, () => ({ value: { value: BOARD, version: 1 } }))
+
+    const ui = await mount($, 80)
+
+    expect((await ui.find({ key: 'clawd' }))?.type).toBe('Raster')
+    expect((await ui.find({ key: 'track:s' }))?.type).toBe('Raster')
+    expect((await ui.find({ key: 'icon:.scratch/s/issues/02-b.md' }))?.type).toBe('Raster')
+    expect(await ui.find({ key: 'icon:.scratch/s/issues/01-a.md' })).toBeUndefined()
+    expect(await ui.find({ text: '1/3 done' })).toBeDefined()
+    expect(await ui.find({ key: 'issue:.scratch/s/issues/03-c.md' })).toBeDefined()
+  })
+
+  test('the desktop draws them still', async ($, on) => {
+    mock.clock(on)
+    on('state.get', { plugin: 'orchestra', key: 'board' }, () => ({ value: { value: BOARD, version: 1 } }))
+
+    const ui = await mount($, 80, 'desktop')
+
+    expect(await ui.find({ type: 'Raster' })).toBeUndefined()
+    expect(await ui.find({ text: '▝▜█████▛▘' })).toBeDefined()
+    // The line into a stop done or running is solid, the rest dotted.
+    expect(await ui.find({ type: 'Text', text: '✓━━━━◐┄┄┄┄⏸' })).toBeDefined()
+  })
+
+  test('a narrow pane leaves Clawd out', async ($, on) => {
+    mock.clock(on)
+    on('state.get', { plugin: 'orchestra', key: 'board' }, () => ({ value: { value: BOARD, version: 1 } }))
+
+    const ui = await mount($, 40)
+
+    expect(await ui.find({ key: 'clawd' })).toBeUndefined()
+    expect(await ui.find({ key: 'lane:s' })).toBeDefined()
+  })
+
+  test('a lane whose every issue is done folds to its header and track', async ($, on) => {
+    mock.clock(on)
+    const done: OrchestraBoard = {
+      issues: BOARD.issues.map(one => ({ ...one, tone: 'done', reason: 'done' })),
+      recent: [],
+    }
+    on('state.get', { plugin: 'orchestra', key: 'board' }, () => ({ value: { value: done, version: 1 } }))
+
+    const ui = await mount($, 80)
+
+    expect(await ui.find({ text: '✓ 3/3 done' })).toBeDefined()
+    expect(await ui.find({ key: 'issue:.scratch/s/issues/01-a.md' })).toBeUndefined()
+    expect(await ui.find({ text: 'Every issue is done' })).toBeDefined()
+  })
+
+  test('a lane just finished draws its sparkle and confetti in cells the terminal takes', async ($, on) => {
+    // 2.3s after the last issue: the line filled, the sparkle is over, confetti crosses mid-track.
+    mock.clock(on, { now: 3300 })
+    const finished: OrchestraBoard = {
+      issues: BOARD.issues.map((one, at) => ({ ...one, tone: 'done', reason: 'done', ...(at === 2 ? { doneAt: 1000 } : {}) })),
+      recent: [],
+    }
+    on('state.get', { plugin: 'orchestra', key: 'board' }, () => ({ value: { value: finished, version: 1 } }))
+
+    const ui = await mount($, 80)
+
+    expect((await ui.find({ key: 'track:s' }))?.type).toBe('Raster')
+    expect((await ui.find({ key: 'clawd' }))?.type).toBe('Raster')
+  })
+
+  test('the timer repaints what moves, and stops once the pane is gone', async ($, on) => {
+    const clock = mock.clock(on)
+    const blits: string[] = []
+    let isMounted = true
+    on('state.get', { plugin: 'orchestra', key: 'board' }, () => ({ value: { value: BOARD, version: 1 } }))
+    on('ui.blit', ($, e) => {
+      blits.push(e.key)
+      return { value: isMounted ? {} : { deny: 'nothing of orchestra is mounted there' } }
+    })
+
+    await mount($, 80)
+    await clock.advance(1000)
+
+    expect(blits).toContain('clawd')
+    expect(blits).toContain('icon:.scratch/s/issues/02-b.md')
+
+    isMounted = false
+    await clock.advance(200)
+    const sent = blits.length
+    await clock.advance(1000)
+
+    expect(blits).toHaveLength(sent)
+  })
 })
 
 describe('band above the prompt', () => {
@@ -107,6 +215,7 @@ describe('band above the prompt', () => {
       const band = await $.ui.mount({ plugin: 'orchestra', surface, component: 'AbovePrompt', props })
       expect((await band.find({ text: '02-b' }))?.text).toContain('Edit hooks/ui.tsx')
       expect(await band.find({ key: 'board' })).toBeDefined()
+      expect(await band.findAll({ type: 'Link', text: '02-b' })).toHaveLength(surface === 'terminal' ? 1 : 0)
 
       const survey = await $.ui.mount({ plugin: 'orchestra', surface, component: 'AbovePrompt', props: { ...props, hasSurvey: true } })
       expect(await survey.find({ text: '02-b' })).toBeUndefined()

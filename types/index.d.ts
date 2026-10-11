@@ -20,8 +20,12 @@ export type OrchestraIssue = {
   tone: OrchestraTone
   /** Why it can't start, or `can start`. */
   reason: string
+  /** Where the issue opens: its file as a `file:` URL, its page on GitHub, or the story's in Jira. */
+  url?: string
   /** The finished job that holds it back, which Release lets go. */
   heldBy?: string
+  /** When this session saw the issue turn done, which its stop celebrates. */
+  doneAt?: number
 }
 
 /** One dispatch as the board shows it. */
@@ -30,6 +34,8 @@ export type OrchestraJob = {
   issue: string
   slug: string
   title: string
+  /** Where its issue opens, while the tracker still lists it. */
+  url?: string
   /** The Ghostty tab's id. */
   tab: string
   /** Whole minutes since dispatch, or the run's length once finished. */

@@ -1,8 +1,9 @@
 import type { RenderElement } from 'claude-code'
 
+import { MARK_KEY } from './mark'
 import type { Scenario } from './scenarios'
 import { band, pane, shownRow, waitRow, workerBand } from './ui'
-import type { Els, Handlers } from './ui'
+import type { Els, Handlers, Motion } from './ui'
 
 // The preview's gallery pane (/orchestra-preview): one scenario's drawings
 // at once, each under a rule as wide as the width it is drawn at. The
@@ -32,7 +33,7 @@ export function gallery(
   el: Els,
   showing: Showing | undefined,
   bodyColumns: number,
-  cells: string | undefined,
+  motion: Motion,
   on: Handlers,
   controls: Controls,
 ): RenderElement {
@@ -43,6 +44,9 @@ export function gallery(
   const columns = width === 0 ? bodyColumns : Math.min(width, bodyColumns)
   const running = scenario.board?.running
   const shown = scenario.shown ?? []
+  // The band's mark turns while its worker works, as it does above the prompt.
+  const isWorking = scenario.worker === undefined ? running !== undefined : scenario.worker.ended === undefined
+  const cells = isWorking ? motion(MARK_KEY, { kind: 'mark' }) : undefined
   const rule = (name: string) => (
     <Box key={`rule:${name}`} marginTop={1}>
       <Text dimColor>{`── ${name} ${'─'.repeat(Math.max(0, columns - name.length - 4))}`}</Text>
@@ -64,7 +68,7 @@ export function gallery(
       <Text dimColor wrap="truncate-end">
         {scenario.about}
       </Text>
-      {scenario.board === undefined ? null : [rule('Board'), pane(el, scenario.board, columns, on)]}
+      {scenario.board === undefined ? null : [rule('Board'), pane(el, scenario.board, columns, on, motion)]}
       {scenario.worker !== undefined
         ? [rule('Band above the prompt'), workerBand(el, scenario.worker, cells, columns)]
         : running !== undefined

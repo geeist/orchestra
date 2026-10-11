@@ -219,7 +219,8 @@ An issue can be named by its number (`03`), its slug (`03-login-form`), `<featur
 
 | Where | What |
 |---|---|
-| **Board** (`/orchestra`) | Every issue by feature, marked ✓ done, ◐ running, ○ can start, ⏸ held or · waiting. Under them, the running worker and the last five jobs. Buttons: **Dispatch next** (`n`), **Start** on an issue that can start, **Focus tab** (`f`) and **Abandon** on the running worker, **Release** on a held issue |
+| **Board** (`/orchestra`) | On top, Clawd the crab and how the board stands: what runs, what is next, or why nothing can start. Buttons: **Dispatch next** (`n`), or **Focus tab** (`f`) and **Abandon** while a worker runs. Under it, a lane per feature (the `.scratch` folder, the parent issue or the epic): a track with a stop per issue, then a row per issue, marked ✓ done, ◐ running, ○ can start, ⏸ held or · waiting, with **Start** and **Release** where they apply. A lane whose every issue is done folds to its track. Each issue's name links to it: its GitHub or Jira page, or its `.scratch` file (in the terminal only). Last, the five most recent jobs |
+| **Animations** | In the terminal, Clawd scuttles while a worker runs, waits for you to dispatch, waves when only held issues are left, sleeps when every issue waits, and dances once all are done. A light runs along a track into the running stop, and the next issue breathes. When an issue finishes, the line fills up to its stop and the stop sparkles. The last issue of a lane sends confetti across its track. Other surfaces draw all of it still |
 | **Band above the prompt** | While a worker runs: a purple spinner beside the word *orchestra*, with a light passing over it, then the issue, minutes, tool count and latest tool call, with **Board** and **Focus tab**. The worker's own session has a band too: its job, and once it reports, the outcome. Outside the terminal the spinner stands still |
 | **Tool rows** | A running `wait` shows the worker's heartbeat. A report shows as a card: outcome, commits, issue, working tree, what's next, and the summary |
 
@@ -280,7 +281,7 @@ It starts `claude` with this checkout as a `--plugin-dir`, the installed orchest
 | `w` | Draw at the pane's width, then at 100, 80, 60 and 40 columns |
 | `x` | End the preview. So does closing the gallery or `/orchestra-preview off` |
 
-While a preview runs, the buttons on the board and the band only say what they would do. The scenarios live in `hooks/scenarios.ts`: add one for each state a change should be checked in.
+While a preview runs, the buttons on the board and the band only say what they would do. The scenarios live in `hooks/scenarios.ts`: add one for each state a change should be checked in. The preview replays every finish in a scenario each 6 seconds, so `finish` shows the fill, the sparkle and the confetti again and again.
 
 Check it before you commit:
 
@@ -298,6 +299,7 @@ npx -p typescript tsc -p .
 | `hooks/scenarios.ts` | The preview's made-up states |
 | `hooks/gallery.tsx` | Draws the preview's gallery pane |
 | `hooks/mark.ts` | The band's animated mark: the spinner and the light, as Raster cells |
+| `hooks/motion.ts` | What moves on the board: Clawd, the tracks and the icons, as Raster cells, and their still versions |
 | `hooks/scratch.ts` | Reads the `.scratch` issues, and plans the issues of either tracker |
 | `hooks/github.ts` | Reads the GitHub issues: the query, the tickets, their labels and blockers |
 | `hooks/jira.ts` | Reads the Jira stories: the scope the tracker file names, the search, the epics, labels and blockers |

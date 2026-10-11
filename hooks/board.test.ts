@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { board, describeCall, holds, lateReport, settle } from './board'
+import { board, describeCall, holds, lateReport, settle, stampDone } from './board'
 import type { Job, WorkerState } from './board'
-import { parseIssue, plan } from './scratch'
+import { fileUrl, parseIssue, plan } from './scratch'
 
 const MIN = 60_000
 
@@ -78,6 +78,37 @@ describe('holds', () => {
   })
 })
 
+describe('stampDone', () => {
+  const issue = (path: string, tone: 'done' | 'ready') => ({ path, feature: 'f', slug: path, title: path, tone, reason: '' })
+
+  test('stamps an issue that turned done, keeps the stamp, and stamps none the board never showed undone', () => {
+    const stamps = new Map<string, number>()
+    const was = new Map([['a', 'ready' as const], ['b', 'done' as const]])
+
+    const first = stampDone([issue('a', 'done'), issue('b', 'done'), issue('c', 'done')], was, stamps, 100)
+    expect(first.map(one => one.doneAt)).toEqual([100, undefined, undefined])
+
+    const later = stampDone([issue('a', 'done')], new Map([['a', 'done' as const]]), stamps, 900)
+    expect(later[0]?.doneAt).toBe(100)
+
+    const reopened = stampDone([issue('a', 'ready')], new Map([['a', 'done' as const]]), stamps, 1000)
+    expect(reopened[0]?.doneAt).toBeUndefined()
+    expect(stamps.has('a')).toBe(false)
+  })
+
+  test('the first board of a session stamps nothing', () => {
+    expect(stampDone([issue('a', 'done')], undefined, new Map(), 1)[0]?.doneAt).toBeUndefined()
+  })
+})
+
+describe('fileUrl', () => {
+  test('percent-encodes each part of the path', () => {
+    expect(fileUrl('/Users/me/my repo/.scratch/a#b/issues/01-x.md')).toBe(
+      'file:///Users/me/my%20repo/.scratch/a%23b/issues/01-x.md',
+    )
+  })
+})
+
 describe('board', () => {
   const issue = (number: string, status: string, blockedBy = 'None') =>
     parseIssue(
@@ -115,6 +146,19 @@ describe('board', () => {
       isMine: true,
     })
     expect(drawn.recent.map(one => one.outcome)).toEqual(['failed'])
+  })
+
+  test("each issue and job links to the issue, while the tracker lists it", () => {
+    const url = 'file:///repo/.scratch/local-stack/issues/02-thing.md'
+    const list = plan([{ ...issue('02', 'ready-for-agent'), url }])
+    const gone = job({ id: 'gone', issue: '.scratch/local-stack/issues/09-thing.md', finishedAt: MIN, outcome: 'done' })
+    const jobs = [gone, job({ issue: '.scratch/local-stack/issues/02-thing.md' })]
+
+    const drawn = board({ list, jobs, workers: new Map(), session: 'me', now: MIN })
+
+    expect(drawn.issues[0]?.url).toBe(url)
+    expect(drawn.running?.url).toBe(url)
+    expect(drawn.recent[0]?.url).toBeUndefined()
   })
 
   test('a job with no worker file yet is starting', () => {

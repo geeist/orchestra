@@ -126,6 +126,7 @@ export function board(input: {
   const open = jobs.find(job => job.finishedAt === undefined)
   const next = list.find(one => one.canStart)
   const lastJob = new Map(jobs.map(job => [job.issue, job]))
+  const urls = new Map(list.flatMap(one => (one.url === undefined ? [] : [[one.path, one.url] as const])))
 
   const issues = list.map((one): OrchestraIssue => {
     const tone = toneOf(one, open)
@@ -140,6 +141,7 @@ export function board(input: {
       title: one.title,
       tone,
       reason: one.reason,
+      ...(one.url === undefined ? {} : { url: one.url }),
       ...(isHeld ? { heldBy: holder.id } : {}),
     }
   })
@@ -147,12 +149,14 @@ export function board(input: {
   const show = (job: Job): OrchestraJob => {
     const worker = workers.get(job.id)
     const end = job.finishedAt ?? now
+    const url = urls.get(job.issue)
 
     return {
       id: job.id,
       issue: job.issue,
       slug: job.slug,
       title: job.title,
+      ...(url === undefined ? {} : { url }),
       tab: job.tab,
       minutes: Math.floor((end - job.startedAt) / 60_000),
       phase: job.finishedAt !== undefined ? 'finished' : worker === undefined ? 'starting' : 'running',
@@ -175,6 +179,27 @@ export function board(input: {
       .map(show),
     ...(next === undefined ? {} : { next: next.path }),
   }
+}
+
+/**
+ * Stamps each issue that turned done since the board `was` with `now`, and
+ * keeps the stamps of the earlier ones. An issue the board didn't show yet
+ * gets none: a session doesn't celebrate what was done before it looked.
+ */
+export function stampDone(
+  issues: readonly OrchestraIssue[],
+  was: ReadonlyMap<string, OrchestraTone> | undefined,
+  stamps: Map<string, number>,
+  now: number,
+): OrchestraIssue[] {
+  return issues.map(one => {
+    const before = was?.get(one.path)
+    if (one.tone === 'done' && before !== undefined && before !== 'done') stamps.set(one.path, now)
+    if (one.tone !== 'done') stamps.delete(one.path)
+    const at = stamps.get(one.path)
+
+    return at === undefined ? one : { ...one, doneAt: at }
+  })
 }
 
 function toneOf(one: Candidate, open: Job | undefined): OrchestraTone {
