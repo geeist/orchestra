@@ -11,6 +11,7 @@
 // section, and done means closed. Pure apart from the query, so the tests
 // cover it whole.
 
+import type { JiraScope } from './jira'
 import { boxes, field } from './scratch'
 import type { Issue } from './scratch'
 
@@ -22,13 +23,13 @@ export type Role = (typeof ROLES)[number]
 export type Labels = Record<Role, string>
 
 /** Where the repo's issues live. */
-export type Tracker = { kind: 'local' } | { kind: 'github'; labels: Labels }
+export type Tracker = { kind: 'local' } | { kind: 'github'; labels: Labels } | ({ kind: 'jira'; labels: Labels } & JiraScope)
 
 /** A label that holds an issue back wins over ready-for-agent: a worker may add one and leave the other. */
 const PRECEDENCE: readonly Role[] = ['wontfix', 'ready-for-human', 'needs-info', 'needs-triage', 'ready-for-agent']
 
 /** The roles that put an issue without a parent on the board. */
-const ON_BOARD: ReadonlySet<string> = new Set<Role>(['ready-for-agent', 'needs-info', 'ready-for-human'])
+export const ON_BOARD: readonly Role[] = ['ready-for-agent', 'needs-info', 'ready-for-human']
 
 /** One issue as QUERY returns it. */
 export type Node = {
@@ -102,17 +103,15 @@ export function githubIssues(
   const byNumber = new Map(nodes.map(node => [node.number, { ...node, body: node.body.replace(/\r\n?/g, '\n') }]))
   const parentOf = (node: Node) => node.parent?.number ?? parentRef(node.body)
   const parents = new Set(nodes.map(parentOf).filter(parent => parent !== undefined))
-  const roleOf = new Map<string, Role>(ROLES.map(role => [labels[role].toLowerCase(), role]))
   const isOpen = (number: number) => byNumber.get(number)?.state === 'OPEN'
 
   const issues: Issue[] = []
   const changedAt = new Map<string, number>()
   for (const node of byNumber.values()) {
     if (parents.has(node.number) || node.subIssuesSummary.total > 0) continue
-    const roles = new Set(node.labels.nodes.map(label => roleOf.get(label.name.toLowerCase())))
-    const role = PRECEDENCE.find(one => roles.has(one)) ?? ''
+    const role = roleOf(node.labels.nodes.map(label => label.name), labels)
     const parent = parentOf(node)
-    if (parent === undefined && !ON_BOARD.has(role)) continue
+    if (parent === undefined && !ON_BOARD.some(one => one === role)) continue
 
     const blockers = new Set([
       ...node.blockedBy.nodes.filter(one => one.state === 'OPEN').map(one => one.number),
@@ -139,6 +138,14 @@ export function githubIssues(
   return { issues, changedAt }
 }
 
+/** The triage role an issue's labels give it, "" for none: the one that holds it back wins. */
+export function roleOf(names: readonly string[], labels: Labels): Role | '' {
+  const byLabel = new Map<string, Role>(ROLES.map(role => [labels[role].toLowerCase(), role]))
+  const roles = new Set(names.map(name => byLabel.get(name.toLowerCase())))
+
+  return PRECEDENCE.find(one => roles.has(one)) ?? ''
+}
+
 /** The parent a ticket's body names, where GitHub links none: `## Parent`, `Parent: #12` or `Part of #12`. */
 function parentRef(body: string): number | undefined {
   const text = section(body, 'Parent') ?? field(body, 'Parent') ?? body.match(/^\W*Part of\b(.*)$/im)?.[1]
@@ -157,7 +164,7 @@ function refs(text: string): number[] {
 }
 
 /** The text under a `## name` heading, up to the next heading. */
-function section(text: string, name: string): string | undefined {
+export function section(text: string, name: string): string | undefined {
   const heading = text.match(new RegExp(String.raw`^#{1,6}[ \t]+${name}[ \t#]*$`, 'im'))
   if (heading?.index === undefined) return undefined
   const rest = text.slice(heading.index + heading[0].length)

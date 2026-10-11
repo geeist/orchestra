@@ -6,6 +6,8 @@ import { board, describe, describeCall, holds, lateReport, MAX_NUDGES, OUTCOMES,
 import type { Job, Settled, WorkerState } from './board'
 import { githubIssues, namesGithub, QUERY, triageLabels } from './github'
 import type { Node, Page, Tracker } from './github'
+import { atlassianServer, FIELDS, jiraIssues, jiraScope, jql, namesJira, SEARCH_TOOL, searchPage } from './jira'
+import type { JiraNode } from './jira'
 import { commandLine, FOCUS_TAB, FRONT_TERMINAL, OPEN_TAB, workerPrompt } from './launch'
 import { FRAME_MS, frameAt, MARK_KEY, markCells, PALETTES, paletteFor } from './mark'
 import { findIssues, parseIssue, plan, sameFeature } from './scratch'
@@ -36,8 +38,10 @@ import type { Els, Handlers } from './ui'
 // tracked and shared by every worktree: `<job>.job.json` is written by the
 // orchestrators, `<job>.worker.json` by the worker alone.
 //
-// The issues are the .scratch files, or the repo's GitHub issues once
-// docs/agents/issue-tracker.md says GitHub; `gh` fetches those.
+// The issues are the .scratch files, the repo's GitHub issues once
+// docs/agents/issue-tracker.md says GitHub (`gh` fetches those), or a Jira
+// project's stories once it says Jira (the session's Atlassian MCP server
+// searches those).
 
 type $ = EngineInterface
 
@@ -46,8 +50,11 @@ type Repo = { top: string; dir: string }
 /** A tool's answer: the text the model reads, and what its row draws. */
 type Answer = { text: string; shown?: OrchestraShown }
 
-/** The tracker's issues, and when each last changed. */
-type Loaded = { tracker: Tracker; issues: Issue[]; changedAt: Map<string, number> }
+/** Issues, and when each last changed (a hold ends once it does). */
+type Issues = { issues: Issue[]; changedAt: Map<string, number> }
+
+/** The tracker's issues. */
+type Loaded = { tracker: Tracker } & Issues
 
 const REFRESH_MS = 5_000
 const BEAT_MS = 5_000
@@ -56,10 +63,10 @@ const WAIT_STEP_SECONDS = 5
 const LATE_WINDOW_MS = 24 * 60 * 60_000
 /** Agent states that mean a worker's turn ended to wait for them. */
 const BUSY = new Set(['pending', 'running', 'waiting'])
-/** How long the board's timer reuses the GitHub issues; the tools fetch them anew. */
-const GITHUB_TTL_MS = 60_000
-/** Pages of 100 open GitHub issues read at most. */
-const GITHUB_PAGES = 10
+/** How long the board's timer reuses the GitHub issues or Jira stories; the tools fetch them anew. */
+const REMOTE_TTL_MS = 60_000
+/** Pages of 100 open GitHub issues, or of 100 Jira stories, read at most. */
+const PAGES = 10
 
 const SHOWN = { plugin: 'orchestra', key: 'shown' } as const
 const boardAtom = atom({ plugin: 'orchestra', key: 'board' } as const, null)
@@ -83,8 +90,8 @@ let palette = PALETTES.dark
 let beat = { activity: '', at: 0, tools: 0, isDirty: false }
 let writing: Promise<void> = Promise.resolve()
 let refreshing: Promise<void> | undefined
-/** The GitHub issues last fetched, shared by calls while they load. */
-let fetched: { at: number; nodes: Promise<Node[]> } | undefined
+/** The GitHub issues or Jira stories last fetched, for the tracker `key` names, shared by calls while they load. */
+let fetched: { at: number; key: string; issues: Promise<Issues> } | undefined
 
 export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
@@ -317,7 +324,10 @@ async function startOrchestrator($: $): Promise<void> {
     inputSchema: {
       type: 'object',
       properties: {
-        feature: { type: 'string', description: 'Only this feature: a .scratch/<feature> folder, or a parent issue (#12)' },
+        feature: {
+          type: 'string',
+          description: 'Only this feature: a .scratch/<feature> folder, a parent issue (#12), or a Jira epic (CORE-12)',
+        },
       },
     },
   })
@@ -331,7 +341,7 @@ async function startOrchestrator($: $): Promise<void> {
         issue: {
           type: 'string',
           description:
-            'A number (03, or #42 on GitHub), slug (03-ui-shell), feature/number or path; default the next that can start',
+            'A number (03, #42 on GitHub, CORE-42 in Jira), slug (03-ui-shell), feature/number or path; default the next that can start',
         },
         force: { type: 'boolean', description: 'Start it although it is not ready or the working tree is dirty' },
       },
@@ -430,33 +440,54 @@ async function findRepo($: $): Promise<Repo | undefined> {
 }
 
 /**
- * The tracker's issues. The GitHub ones are fetched when `isFresh`, or once
- * the last fetch is a minute old: the board's timer runs every few seconds.
+ * The tracker's issues. The GitHub and Jira ones are fetched when `isFresh`,
+ * when the tracker changed, or once the last fetch is a minute old: the
+ * board's timer runs every few seconds.
  */
 async function loadIssues($: $, top: string, isFresh: boolean): Promise<Loaded> {
   const tracker = await trackerOf($, top)
   if (tracker.kind === 'local') return { tracker, ...(await loadScratch($, top)) }
 
   const now = await $.clock.now()
-  if (isFresh || fetched === undefined || now - fetched.at >= GITHUB_TTL_MS) {
-    fetched = { at: now, nodes: fetchGithub($, top) }
+  const key = JSON.stringify(tracker)
+  if (isFresh || fetched === undefined || fetched.key !== key || now - fetched.at >= REMOTE_TTL_MS) {
+    const issues =
+      tracker.kind === 'github'
+        ? fetchGithub($, top).then(nodes => githubIssues(nodes, tracker.labels))
+        : fetchJira($, tracker).then(nodes => jiraIssues(nodes, tracker.labels))
+    fetched = { at: now, key, issues }
   }
 
-  return { tracker, ...githubIssues(await fetched.nodes, tracker.labels) }
+  return { tracker, ...(await fetched.issues) }
 }
 
-/** The tracker docs/agents/issue-tracker.md names, with docs/agents/triage-labels.md's labels. */
+/**
+ * The tracker docs/agents/issue-tracker.md names, with docs/agents/triage-labels.md's
+ * labels; for Jira also its site, project and epics, and the Atlassian MCP server.
+ */
 async function trackerOf($: $, top: string): Promise<Tracker> {
-  if (!namesGithub(await readText($, `${top}/docs/agents/issue-tracker.md`))) return { kind: 'local' }
+  const doc = await readText($, `${top}/docs/agents/issue-tracker.md`)
+  const isGithub = namesGithub(doc)
+  if (!isGithub && !namesJira(doc)) return { kind: 'local' }
+  const labels = triageLabels(await readText($, `${top}/docs/agents/triage-labels.md`))
+  if (isGithub) return { kind: 'github', labels }
 
-  return { kind: 'github', labels: triageLabels(await readText($, `${top}/docs/agents/triage-labels.md`)) }
+  const scope = jiraScope(doc ?? '')
+  const server = scope.server ?? atlassianServer((await $.tool.list()).map(tool => tool.name))
+  if (server === undefined) {
+    throw new Error(
+      `this session has no Atlassian MCP server, which orchestra reads Jira through: connect one (https://mcp.atlassian.com/v1/mcp), or name yours in docs/agents/issue-tracker.md with a line "MCP server: <name>"`,
+    )
+  }
+
+  return { kind: 'jira', labels, ...scope, server }
 }
 
 /** The open issues, page by page, and the ones closed last. */
 async function fetchGithub($: $, top: string): Promise<Node[]> {
   const nodes: Node[] = []
   let after: string | null = null
-  for (let page = 0; page < GITHUB_PAGES; page += 1) {
+  for (let page = 0; page < PAGES; page += 1) {
     const args = ['-F', 'owner={owner}', '-F', 'repo={repo}', '-F', `withClosed=${page === 0}`, '-f', `query=${QUERY}`]
     if (after !== null) args.push('-f', `after=${after}`)
     const ran = await $.process.run(['gh', 'api', 'graphql', ...args], { cwd: top })
@@ -470,7 +501,23 @@ async function fetchGithub($: $, top: string): Promise<Node[]> {
   return nodes
 }
 
-async function loadScratch($: $, top: string): Promise<{ issues: Issue[]; changedAt: Map<string, number> }> {
+/** The stories the scope names, page by page, through the Atlassian MCP server. */
+async function fetchJira($: $, tracker: Extract<Tracker, { kind: 'jira' }>): Promise<JiraNode[]> {
+  const nodes: JiraNode[] = []
+  const search = { cloudId: tracker.site, jql: jql(tracker, tracker.labels), fields: FIELDS, maxResults: 100 }
+  let nextPageToken: string | undefined
+  for (let page = 0; page < PAGES; page += 1) {
+    const args = nextPageToken === undefined ? search : { ...search, nextPageToken }
+    const found = searchPage(await $.mcp.call(tracker.server, SEARCH_TOOL, args))
+    nodes.push(...found.issues)
+    if (found.isLast === true || found.nextPageToken === undefined) break
+    nextPageToken = found.nextPageToken
+  }
+
+  return nodes
+}
+
+async function loadScratch($: $, top: string): Promise<Issues> {
   const issues: Issue[] = []
   const changedAt = new Map<string, number>()
   const root = `${top}/.scratch`

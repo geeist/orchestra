@@ -1,37 +1,38 @@
 // The local issue tracker, read: `.scratch/<feature>/issues/NN-slug.md`, each
 // with a Status line, a Blocked by line and checkboxes (the repo's
-// docs/agents/issue-tracker.md). Also the plan both trackers share: which
+// docs/agents/issue-tracker.md). Also the plan every tracker shares: which
 // issue can start, and which one a reference names. Pure, so the tests cover
 // it whole.
 
 export type Issue = {
   /**
    * What names the issue for good: relative to the repo root
-   * (`.scratch/<feature>/issues/03-ui-shell.md`), or `#42` on GitHub.
+   * (`.scratch/<feature>/issues/03-ui-shell.md`), `#42` on GitHub, or the
+   * Jira story's key (`CORE-42`).
    */
   path: string
-  /** The .scratch folder, or the parent issue on GitHub (`#12`, "" for none). */
+  /** The .scratch folder, the parent issue on GitHub (`#12`), or the Jira epic (`CORE-12`); "" for none. */
   feature: string
-  /** The parent issue's title, on GitHub. */
+  /** The parent issue's or the epic's title, on GitHub and Jira. */
   featureTitle?: string
-  /** The file name's leading number, two digits at least (`03`), or the GitHub issue's (`42`). */
+  /** The file name's leading number, two digits at least (`03`), or the GitHub issue's or Jira key's (`42`). */
   number: string
-  /** The file name without `.md` (`03-ui-shell`), or `#42` on GitHub. */
+  /** The file name without `.md` (`03-ui-shell`), `#42` on GitHub, `CORE-42` in Jira. */
   slug: string
-  /** How the tools name it to the model: `local-stack/03-ui-shell`, or `#42`. */
+  /** How the tools name it to the model: `local-stack/03-ui-shell`, `#42` or `CORE-42`. */
   ref: string
   title: string
-  /** The Status line's first word, lower-cased, or the GitHub triage label's role; "" when there is none. */
+  /** The Status line's first word, lower-cased, or the triage label's role on GitHub and Jira; "" when there is none. */
   status: string
   /**
-   * The numbers on the Blocked by line, spelled like `number`. On GitHub only
-   * the blockers still open, as `#41`: done there means closed, so each one
-   * keeps the issue waiting.
+   * The numbers on the Blocked by line, spelled like `number`. On GitHub and
+   * Jira only the blockers not done yet, as `#41` or `CORE-41`: each one keeps
+   * the issue waiting.
    */
   blockedBy: string[]
   openBoxes: number
   doneBoxes: number
-  /** A done status, or every checkbox ticked (how 01 and 02 were closed); closed on GitHub. */
+  /** A done status, or every checkbox ticked (how 01 and 02 were closed); closed on GitHub, in the Done category in Jira. */
   isDone: boolean
 }
 
@@ -88,13 +89,15 @@ export function plan(issues: readonly Issue[], held: ReadonlyMap<string, string>
 /**
  * The issues `ref` names: a path, a slug (`03-ui-shell`), a number (`03`, `3`),
  * or either behind its feature (`local-stack/03`). On GitHub also `#42`, a
- * link to the issue, or `#12/42`.
+ * link to the issue, or `#12/42`; in Jira `CORE-42`, a link to it, or
+ * `CORE-12/CORE-42`.
  */
 export function findIssues<T extends Issue>(issues: readonly T[], ref: string): T[] {
   const want = ref
     .trim()
     .replace(/^\.\//, '')
     .replace(/^https?:\/\/\S+\/issues\/(\d+)\/?$/, '#$1')
+    .replace(/^https?:\/\/\S+\/browse\/([a-z][\w]*-\d+)\/?$/i, '$1')
     .toLowerCase()
   const slash = want.lastIndexOf('/')
   const feature = slash > 0 && !want.endsWith('.md') ? want.slice(0, slash) : undefined
@@ -107,7 +110,7 @@ export function findIssues<T extends Issue>(issues: readonly T[], ref: string): 
   })
 }
 
-/** Whether `name` names the feature: its folder, or its parent issue with or without the `#`. */
+/** Whether `name` names the feature: its folder, its parent issue with or without the `#`, or its epic. */
 export function sameFeature(feature: string, name: string): boolean {
   return feature.replace(/^#/, '').toLowerCase() === name.replace(/^#/, '').toLowerCase()
 }
@@ -132,7 +135,7 @@ function normalize(number: string): string {
   return /^\d+$/.test(number) ? String(Number(number)).padStart(2, '0') : number
 }
 
-/** By feature, the GitHub issues without one last, then by number. */
+/** By feature, the GitHub and Jira issues without one last, then by number. */
 function byOrder(a: Issue, b: Issue): number {
   return (
     Number(a.feature === '') - Number(b.feature === '') ||

@@ -7,7 +7,7 @@ import type { Candidate, Issue } from './scratch'
 /** One dispatch, as the orchestrator records it. */
 export type Job = {
   id: string
-  /** The issue's path, relative to the repo root, or `#42` on GitHub. */
+  /** The issue's path, relative to the repo root, `#42` on GitHub, or `CORE-42` in Jira. */
   issue: string
   slug: string
   title: string
