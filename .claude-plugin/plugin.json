@@ -1,6 +1,6 @@
 {
   "name": "orchestra",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Runs .scratch, GitHub or Jira issues one at a time in unattended worker sessions, each in its own Ghostty tab, shows them on a live board, and wakes the orchestrator when a worker reports",
   "author": {
     "name": "Tobias Kleemann",

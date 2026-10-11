@@ -561,8 +561,17 @@ async function candidates(
   return { list: plan(issues, holds(jobs, changedAt)), jobs, tracker }
 }
 
-function readWorkerOf($: $, dir: string, job: Job): Promise<WorkerState | undefined> {
-  return readJson<WorkerState>($, `${dir}/${job.id}.worker.json`)
+/**
+ * The worker's side of the job, undefined while it has written none. A file
+ * caught mid-write (its heartbeat rewrites it every few seconds) reads as
+ * running: read as missing, it would settle the job never-started.
+ */
+async function readWorkerOf($: $, dir: string, job: Job): Promise<WorkerState | undefined> {
+  const path = `${dir}/${job.id}.worker.json`
+  const state = await readJson<WorkerState>($, path)
+  if (state !== undefined || !(await $.fs.exists(path))) return state
+
+  return { state: 'running', updatedAt: job.startedAt }
 }
 
 /** Marks the job finished (or its late report delivered), and writes what the orchestrator's model reads. */
@@ -571,11 +580,16 @@ async function deliver($: $, where: Repo, job: Job, settled: Settled, lateFrom?:
   const patch: Partial<Job> =
     lateFrom === undefined ? { finishedAt: now, outcome: settled.outcome } : { lateDeliveredAt: now }
   await writeJson($, `${where.dir}/${job.id}.job.json`, { ...job, ...patch })
-  if (lateFrom === undefined) void $.ui.notify(`${job.slug}: ${settled.outcome}`, { title: 'orchestra' })
+  // A job written finished is never delivered again: from here nothing may throw, or the report reaches no one.
+  if (lateFrom === undefined) void notify($, `${job.slug}: ${settled.outcome}`)
 
   const commits = await git($, ['log', '--oneline', `${job.baseHead}..HEAD`], where.top).catch(() => '')
   const dirty = await git($, ['status', '--porcelain'], where.top).catch(() => '')
-  const { list } = await candidates($, where, true)
+  const listed = await candidates($, where, true).then(
+    found => found.list,
+    (error: unknown) => new Error(message(error)),
+  )
+  const list = listed instanceof Error ? [] : listed
   const issue = list.find(one => one.path === job.issue)
   const next = list.find(one => one.canStart)
   const ended = lateFrom === undefined ? now : (job.late?.at ?? now)
@@ -587,7 +601,7 @@ async function deliver($: $, where: Repo, job: Job, settled: Settled, lateFrom?:
     minutes: Math.round((ended - job.startedAt) / 60_000),
     summary: settled.summary,
     commits: lines(commits),
-    issue: issue === undefined ? 'gone' : describe(issue),
+    issue: listed instanceof Error ? `unread: ${listed.message}` : issue === undefined ? 'gone' : describe(issue),
     dirty: lines(dirty),
     ...(next === undefined ? {} : { next: next.ref }),
   }
@@ -765,9 +779,7 @@ async function rebuild($: $): Promise<void> {
     if (late === undefined) continue
     job.late = late
     await writeJson($, `${where.dir}/${job.id}.job.json`, job)
-    if (job.session === session) {
-      void $.ui.notify(`${job.slug}: reported ${late.outcome} after it was marked ${job.outcome}`, { title: 'orchestra' })
-    }
+    if (job.session === session) void notify($, `${job.slug}: reported ${late.outcome} after it was marked ${job.outcome}`)
   }
 
   const drawn: OrchestraBoard = {
@@ -903,6 +915,18 @@ async function jobOf($: $, id: string): Promise<{ path: string; job: Job }> {
   if (job === undefined) throw new Error(`job ${id} is gone`)
 
   return { path, job }
+}
+
+/**
+ * A native notification, or a toast where none is raised: an engine without
+ * `$.ui.notify` throws "is not a function", and a hook may refuse it.
+ */
+async function notify($: $, text: string): Promise<void> {
+  try {
+    await $.ui.notify(text, { title: 'orchestra' })
+  } catch {
+    $.ui.toast(text)
+  }
 }
 
 async function toast($: $, line: Promise<string>): Promise<void> {
